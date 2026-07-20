@@ -969,8 +969,6 @@ let mk_char_prim_legacy = "Char.legacy.mk.reflective_prim"
 (*
 Register Nat_isValidChar as lean.Nat_isValidChar.
 Register reflective_Char_mk_prim as lean.Char.mk.reflective_prim. *)
-let nat_double = "Nat_double"
-
 (** For each name, the instantiation with all non-sprop univs should always be
     declared, but the instantiations with SProp may be lazily declared. We
     expect small instance lengths (experimentally at most 4 in the stdlib) so we
@@ -1073,35 +1071,29 @@ let one_more_int nat =
 
 let max_nat_int = Z.of_string "5000"
 
-let nat_int_binary nat double i =
-  assert (Z.leq Z.zero i);
-  let rec to_binary z acc =
-    if Z.equal z Z.zero then acc
-    else
-      let bit = if Z.equal (Z.rem z (Z.of_int 2)) Z.zero then 0 else 1 in
-      to_binary (Z.div z (Z.of_int 2)) (bit :: acc)
-  in
-  let binary_representation = to_binary i [] in
-  let xO = Constr.mkConstructU ((nat, 1), UVars.Instance.empty) in
-  let xS = Constr.mkConstructU ((nat, 2), UVars.Instance.empty) in
-  let fS x = Constr.mkApp (xS, [| x |]) in
-  let fDouble x = Constr.mkApp (double, [| x |]) in
-  let rec construct_nat binary_list_rev =
-    match binary_list_rev with
-    | [] -> xO
-    | 0 :: rest ->
-      let rest_constr = construct_nat rest in
-      fDouble rest_constr
-    | 1 :: rest ->
-      let rest_constr = construct_nat rest in
-      fS (fDouble rest_constr)
-    | _ -> assert false
-  in
-  construct_nat (List.rev binary_representation)
+let registered_ref key =
+  Constr.mkRef (Rocqlib.lib_ref key, UVars.Instance.empty)
 
-let nat_int nat double i =
+let rec positive_int i =
+  assert (Z.lt Z.zero i);
+  if Z.equal i Z.one then registered_ref "num.pos.xH"
+  else
+    let constructor =
+      if Z.equal (Z.rem i (Z.of_int 2)) Z.zero then "num.pos.xO"
+      else "num.pos.xI"
+    in
+    Constr.mkApp
+      (registered_ref constructor, [| positive_int (Z.div i (Z.of_int 2)) |])
+
+let n_int i =
   assert (Z.leq Z.zero i);
-  if Z.leq max_nat_int i then nat_int_binary nat double i
+  if Z.equal i Z.zero then registered_ref "num.N.N0"
+  else
+    Constr.mkApp (registered_ref "num.N.Npos", [| positive_int i |])
+
+let nat_int nat nat_of_n i =
+  assert (Z.leq Z.zero i);
+  if Z.leq max_nat_int i then Constr.mkApp (nat_of_n, [| n_int i |])
   else begin
     while Z.lt !max_known_int i do
       one_more_int nat
@@ -2390,6 +2382,415 @@ let adapt_mutual_nested_recursor env evd info recursors args =
       in
       Some (constr_app result extra)
 
+(** Proof-producing reflection for closed natural-number arithmetic.
+
+    This deliberately does not add a reduction rule to Rocq.  [reify_nat]
+    evaluates a small, generic arithmetic language with Zarith and constructs
+    a proof of [NatCertificate] in parallel.  The proof is later consumed by
+    [NatCertificate_equal] and [Nat_transport_sprop], so the value computed by
+    OCaml is checked independently by the Rocq kernel. *)
+type nat_certificate = {
+  nat_term : Constr.t;
+  nat_value : Z.t;
+  nat_proof : Constr.t;
+}
+
+let ref_matches env term key =
+  try
+    let gr, _ = Constr.destRef term in
+    Environ.QGlobRef.equal env gr (Rocqlib.lib_ref key)
+  with Constr.DestKO -> false
+
+let nat_constructor_matches env term index =
+  match Rocqlib.lib_ref "lean.Nat", Constr.kind term with
+  | GlobRef.IndRef ind, Construct ((constructor_ind, constructor_index), _) ->
+    index = constructor_index && Environ.QInd.equal env ind constructor_ind
+  | _ -> false
+
+let cert_app key args = Constr.mkApp (registered_ref key, Array.of_list args)
+
+let rec z_of_positive env term =
+  let head, args = Constr.decompose_app term in
+  if ref_matches env head "num.pos.xH" && Array.length args = 0 then Some Z.one
+  else if ref_matches env head "num.pos.xO" && Array.length args = 1 then
+    Option.map (fun n -> Z.mul (Z.of_int 2) n) (z_of_positive env args.(0))
+  else if ref_matches env head "num.pos.xI" && Array.length args = 1 then
+    Option.map
+      (fun n -> Z.succ (Z.mul (Z.of_int 2) n))
+      (z_of_positive env args.(0))
+  else None
+
+let z_of_n env term =
+  let head, args = Constr.decompose_app term in
+  if ref_matches env head "num.N.N0" && Array.length args = 0 then Some Z.zero
+  else if ref_matches env head "num.N.Npos" && Array.length args = 1 then
+    z_of_positive env args.(0)
+  else None
+
+let beta_apply head args =
+  let rec apply head index =
+    if index = Array.length args then head
+    else
+      match Constr.kind head with
+      | Lambda (_, _, body) -> apply (Vars.subst1 args.(index) body) (index + 1)
+      | LetIn (_, value, _, body) -> apply (Vars.subst1 value body) index
+      | _ ->
+        Constr.mkApp
+          (head, Array.sub args index (Array.length args - index))
+  in
+  apply head 0
+
+let unfold_head_once env term =
+  let head, args = Constr.decompose_app term in
+  match Constr.kind head with
+  | Const (constant, instance) -> (
+    try beta_apply (Environ.constant_value_in env (constant, instance)) args
+    with Environ.NotEvaluableConst _ -> term)
+  | Lambda _ | LetIn _ -> beta_apply head args
+  | _ -> term
+
+let expose_iota_scrutinee env term =
+  let head, args = Constr.decompose_app term in
+  let expose head =
+    match Constr.kind head with
+    | Case (info, instance, params, return, invert, scrutinee, branches) ->
+      let scrutinee = unfold_head_once env scrutinee in
+      Constr.mkCase
+        (info, instance, params, return, invert, scrutinee, branches)
+    | Proj (projection, relevance, scrutinee) ->
+      let scrutinee = unfold_head_once env scrutinee in
+      let constructor, constructor_args = Constr.decompose_app scrutinee in
+      (match Constr.kind constructor with
+      | Construct _ ->
+        constructor_args.(Projection.npars projection + Projection.arg projection)
+      | _ -> Constr.mkProj (projection, relevance, scrutinee))
+    | _ -> head
+  in
+  let exposed = expose head in
+  if Array.length args = 0 then exposed else Constr.mkApp (exposed, args)
+
+let max_reflected_bits = Z.of_int 1_000_000
+
+let reflected_size_ok value =
+  Z.leq (Z.of_int (Z.numbits value)) max_reflected_bits
+
+let reflected_pow base exponent =
+  if Z.lt exponent Z.zero || not (Z.fits_int exponent) then None
+  else
+    let estimated_bits =
+      if Z.leq base Z.one then Z.one
+      else Z.mul (Z.of_int (Z.numbits base)) exponent
+    in
+    if Z.gt estimated_bits max_reflected_bits then None
+    else
+      let value = Z.pow base (Z.to_int exponent) in
+      if reflected_size_ok value then Some value else None
+
+let reify_nat env evd term =
+  let rec reify fuel unfolded term =
+    let preserve_original result =
+      Option.map (fun certificate -> { certificate with nat_term = term }) result
+    in
+    if fuel = 0 || not (Vars.closed0 term) then None
+    else
+      let head, args = Constr.decompose_app term in
+      if ref_matches env head "lean.Nat_of_N" && Array.length args = 1 then
+        Option.map
+          (fun value ->
+            {
+              nat_term = term;
+              nat_value = value;
+              nat_proof =
+                cert_app "lean.NatCertificate_of_N" [ n_int value ];
+            })
+          (z_of_n env args.(0))
+      else if nat_constructor_matches env head 1 && Array.length args = 0 then
+        Some
+          {
+            nat_term = term;
+            nat_value = Z.zero;
+            nat_proof = registered_ref "lean.NatCertificate_zero";
+          }
+      else if nat_constructor_matches env head 2 && Array.length args = 1 then
+        Option.bind (reify (fuel - 1) unfolded args.(0)) (fun arg ->
+            let value = Z.succ arg.nat_value in
+            if not (reflected_size_ok value) then None
+            else
+              Some
+                {
+                  nat_term = term;
+                  nat_value = value;
+                  nat_proof =
+                    cert_app "lean.NatCertificate_succ"
+                      [ arg.nat_term; n_int arg.nat_value; arg.nat_proof ];
+                })
+      else
+        let binary key proof_key operation =
+          if ref_matches env head key && Array.length args = 2 then
+            Option.bind (reify (fuel - 1) unfolded args.(0)) (fun left ->
+                Option.bind (reify (fuel - 1) unfolded args.(1)) (fun right ->
+                    Option.bind (operation left.nat_value right.nat_value)
+                      (fun value ->
+                        if not (reflected_size_ok value) then None
+                        else
+                          Some
+                            {
+                              nat_term = term;
+                              nat_value = value;
+                              nat_proof =
+                                cert_app proof_key
+                                  [
+                                    left.nat_term;
+                                    right.nat_term;
+                                    n_int left.nat_value;
+                                    n_int right.nat_value;
+                                    left.nat_proof;
+                                    right.nat_proof;
+                                  ];
+                            })))
+          else None
+        in
+        match
+          binary "lean.Nat_add" "lean.NatCertificate_add"
+            (fun a b -> Some (Z.add a b))
+        with
+        | Some _ as result -> result
+        | None -> (
+          match
+            binary "lean.Nat_mul" "lean.NatCertificate_mul"
+              (fun a b -> Some (Z.mul a b))
+          with
+          | Some _ as result -> result
+          | None -> (
+            match
+              binary "lean.Nat_pow" "lean.NatCertificate_pow" reflected_pow
+            with
+            | Some _ as result -> result
+            | None ->
+              let reduced =
+                expose_iota_scrutinee env term |> EConstr.of_constr
+                |> Reductionops.whd_betaiotazeta env evd
+                |> EConstr.Unsafe.to_constr
+              in
+              if not (Constr.equal reduced term) then
+                preserve_original (reify (fuel - 1) unfolded reduced)
+              else (
+              match Constr.kind term with
+              | LetIn (_, value, _, body) ->
+                preserve_original
+                  (reify (fuel - 1) unfolded (Vars.subst1 value body))
+              | Const (constant, instance)
+                when not
+                       (List.exists
+                          (fun seen -> Environ.QConstant.equal env constant seen)
+                          unfolded) -> (
+                try
+                  let body =
+                    Environ.constant_value_in env (constant, instance)
+                  in
+                  preserve_original
+                    (reify (fuel - 1) (constant :: unfolded) body)
+                with Environ.NotEvaluableConst _ -> None)
+              | App _ -> (
+                match Constr.kind head with
+                | Const (constant, instance)
+                  when not
+                         (List.exists
+                            (fun seen ->
+                              Environ.QConstant.equal env constant seen)
+                            unfolded) -> (
+                  try
+                    let body =
+                      Environ.constant_value_in env (constant, instance)
+                    in
+                    preserve_original
+                      (reify (fuel - 1) (constant :: unfolded)
+                         (beta_apply body args))
+                  with Environ.NotEvaluableConst _ -> None)
+                | Lambda _ | LetIn _ ->
+                  preserve_original
+                    (reify (fuel - 1) unfolded (beta_apply head args))
+                | _ -> None)
+              | _ -> None)))
+  in
+  reify 128 [] term
+
+type certificate_path_step =
+  | AppArgument of int
+  | ProdDomain
+  | ProdCodomain
+  | LambdaDomain
+  | LambdaBody
+  | LetValue
+  | LetType
+  | LetBody
+
+let rec first_certified_nat_difference env evd path actual expected =
+  if Constr.equal actual expected then None
+  else
+    match reify_nat env evd actual, reify_nat env evd expected with
+    | Some left, Some right when Z.equal left.nat_value right.nat_value ->
+      Some (List.rev path, left, right)
+    | _ -> (
+      match Constr.kind actual, Constr.kind expected with
+      | Prod (_, actual_domain, actual_body),
+        Prod (_, expected_domain, expected_body) -> (
+        match
+          first_certified_nat_difference env evd (ProdDomain :: path)
+            actual_domain expected_domain
+        with
+        | Some _ as result -> result
+        | None ->
+          first_certified_nat_difference env evd (ProdCodomain :: path)
+            actual_body expected_body)
+      | Lambda (_, actual_domain, actual_body),
+        Lambda (_, expected_domain, expected_body) -> (
+        match
+          first_certified_nat_difference env evd (LambdaDomain :: path)
+            actual_domain expected_domain
+        with
+        | Some _ as result -> result
+        | None ->
+          first_certified_nat_difference env evd (LambdaBody :: path)
+            actual_body expected_body)
+      | LetIn (_, actual_value, actual_type, actual_body),
+        LetIn (_, expected_value, expected_type, expected_body) -> (
+        match
+          first_certified_nat_difference env evd (LetValue :: path) actual_value
+            expected_value
+        with
+        | Some _ as result -> result
+        | None -> (
+          match
+            first_certified_nat_difference env evd (LetType :: path) actual_type
+              expected_type
+          with
+          | Some _ as result -> result
+          | None ->
+            first_certified_nat_difference env evd (LetBody :: path) actual_body
+              expected_body))
+      | App _, App _ ->
+        let actual_head, actual_args = Constr.decompose_app actual in
+        let expected_head, expected_args = Constr.decompose_app expected in
+        if
+          not (Constr.equal actual_head expected_head)
+          || Array.length actual_args <> Array.length expected_args
+        then None
+        else
+          let rec scan index =
+            if index = Array.length actual_args then None
+            else
+              match
+                first_certified_nat_difference env evd
+                  (AppArgument index :: path)
+                  actual_args.(index) expected_args.(index)
+              with
+              | Some _ as result -> result
+              | None -> scan (index + 1)
+          in
+          scan 0
+      | _ -> None)
+
+let replace_certificate_path term path replacement =
+  let rec replace depth term = function
+    | [] -> Vars.lift depth replacement
+    | AppArgument index :: rest ->
+      let head, args = Constr.decompose_app term in
+      if index >= Array.length args then assert false;
+      let args = Array.copy args in
+      args.(index) <- replace depth args.(index) rest;
+      Constr.mkApp (head, args)
+    | ProdDomain :: rest ->
+      let annot, domain, body = Constr.destProd term in
+      Constr.mkProd (annot, replace depth domain rest, body)
+    | ProdCodomain :: rest ->
+      let annot, domain, body = Constr.destProd term in
+      Constr.mkProd (annot, domain, replace (depth + 1) body rest)
+    | LambdaDomain :: rest ->
+      let annot, domain, body = Constr.destLambda term in
+      Constr.mkLambda (annot, replace depth domain rest, body)
+    | LambdaBody :: rest ->
+      let annot, domain, body = Constr.destLambda term in
+      Constr.mkLambda (annot, domain, replace (depth + 1) body rest)
+    | LetValue :: rest ->
+      let annot, value, ty, body = Constr.destLetIn term in
+      Constr.mkLetIn (annot, replace depth value rest, ty, body)
+    | LetType :: rest ->
+      let annot, value, ty, body = Constr.destLetIn term in
+      Constr.mkLetIn (annot, value, replace depth ty rest, body)
+    | LetBody :: rest ->
+      let annot, value, ty, body = Constr.destLetIn term in
+      Constr.mkLetIn (annot, value, ty, replace (depth + 1) body rest)
+  in
+  replace 0 term path
+
+let is_sprop_type env evd ty =
+  let sort =
+    Retyping.get_type_of env evd (EConstr.of_constr ty)
+    |> Reductionops.whd_all env evd |> EConstr.Unsafe.to_constr
+  in
+  match Constr.kind sort with Sort sort -> Sorts.is_sprop sort | _ -> false
+
+let transport_closed_nat env evd actual expected argument =
+  if not (is_sprop_type env evd actual) then None
+  else
+    let rec transport fuel actual argument =
+      if Constr.equal actual expected then Some argument
+      else if fuel = 0 then None
+      else
+        match first_certified_nat_difference env evd [] actual expected with
+        | None -> None
+        | Some (path, left, right) ->
+          let canonical = n_int left.nat_value in
+          let equality =
+            cert_app "lean.NatCertificate_equal"
+              [
+                left.nat_term;
+                right.nat_term;
+                canonical;
+                left.nat_proof;
+                right.nat_proof;
+              ]
+          in
+          let motive_body =
+            replace_certificate_path (Vars.lift 1 actual) path (Constr.mkRel 1)
+          in
+          let motive =
+            Constr.mkLambda
+              ( Context.make_annot Anonymous Sorts.Relevant,
+                registered_ref "lean.Nat",
+                motive_body )
+          in
+          let argument =
+            cert_app "lean.Nat_transport_sprop"
+              [ motive; left.nat_term; right.nat_term; equality; argument ]
+          in
+          let actual = replace_certificate_path actual path right.nat_term in
+          transport (fuel - 1) actual argument
+    in
+    transport 16 actual argument
+
+let maybe_transport_to_expected env evd expected argument =
+  let actual =
+    Retyping.get_type_of env evd (EConstr.of_constr argument)
+    |> EConstr.Unsafe.to_constr
+  in
+  if Constr.equal actual expected then argument
+  else
+    match transport_closed_nat env evd actual expected argument with
+    | Some argument -> argument
+    | None -> argument
+
+let maybe_transport_application env evd function_term argument =
+  let function_type =
+    Retyping.get_type_of env evd (EConstr.of_constr function_term)
+    |> Reductionops.whd_all env evd |> EConstr.Unsafe.to_constr
+  in
+  match Constr.kind function_type with
+  | Prod (_, expected, _) ->
+    maybe_transport_to_expected env evd expected argument
+  | _ -> argument
+
 let rec to_constr =
   let open Constr in
   let ( >>= ) x f uconv =
@@ -2408,11 +2809,21 @@ let rec to_constr =
     | (App _ as app_expr) -> (
       let head, args = decompose_lean_app [] app_expr in
       let translate_plain () =
-        let a, b =
+        let a, b_expr =
           match app_expr with App (a, b) -> a, b | _ -> assert false
         in
         to_constr env a >>= fun a ->
-        to_constr env b >>= fun b -> ret (mkApp (a, [| b |]))
+        to_constr env b_expr >>= fun b ->
+        (match b_expr with
+        | Bound _ ->
+          get_uconv >>= fun uconv ->
+          let b =
+            with_env_evm env uconv
+              (fun env evd () -> maybe_transport_application env evd a b)
+              ()
+          in
+          ret (mkApp (a, [| b |]))
+        | _ -> ret (mkApp (a, [| b |])))
       in
       match head with
       | Const (n, univs) -> (
@@ -2511,16 +2922,16 @@ let rec to_constr =
       instantiate (N.append N.anon "Nat") [] >>= fun nat ->
       let nat, _ = Constr.destInd nat in
       get_uconv >>= fun uconv ->
-      let double =
+      let nat_of_n =
         with_env_evm env uconv
           (fun env evd () ->
             let _, p =
-              Evd.fresh_global env evd (Rocqlib.lib_ref ("lean." ^ nat_double))
+              Evd.fresh_global env evd (Rocqlib.lib_ref "lean.Nat_of_N")
             in
             EConstr.to_constr evd p)
           ()
       in
-      ret (nat_int nat double i)
+      ret (nat_int nat nat_of_n i)
     | String s ->
       (* instantiate (N.append N.anon "Char") [] >>= fun char -> *)
       (* let (_, charu) = Constr.destInd char in *)
@@ -2622,6 +3033,11 @@ and declare_def { name = n; ty; body; univs; } i =
       let uconv = start_uconv univs i in
       let uconv, ty = to_constr empty_env ty uconv in
       let uconv, body = to_constr empty_env body uconv in
+      let body =
+        with_env_evm empty_env uconv
+          (fun env evd () -> maybe_transport_to_expected env evd ty body)
+          ()
+      in
       let univs, algs = univ_entry uconv univs in
       let ref =
         try quickdef ~name:(name_for n i) ~types:(Some ty) ~univs body
