@@ -1344,14 +1344,33 @@ let extended_all_uctx source_uctx =
 
 let qsort q u = Constr.mkSort (Sorts.make q u)
 
-let qname q u id =
-  Context.make_annot
-    (Name (Id.of_string id))
-    (Sorts.relevance_of_sort (Sorts.make q u))
-
 let reln n = Constr.mkRel n
 
 let app f args = Constr.mkApp (f, Array.of_list args)
+
+let annot_for_type env name ty =
+  let evd = Evd.from_env env in
+  let relevance =
+    Retyping.relevance_of_type env evd (EConstr.of_constr ty)
+    |> EConstr.Unsafe.to_relevance
+  in
+  Context.make_annot name relevance
+
+let push_typed_assum env name ty =
+  Environ.push_rel
+    (RelDecl.LocalAssum (annot_for_type env name ty, ty))
+    env
+
+let typed_prod env name ty body =
+  Constr.mkProd (annot_for_type env name ty, ty, body)
+
+let rec typed_lambdas env binders body =
+  match binders with
+  | [] -> body
+  | (name, ty) :: rest ->
+    let annot = annot_for_type env name ty in
+    let env = Environ.push_rel (RelDecl.LocalAssum (annot, ty)) env in
+    Constr.mkLambda (annot, ty, typed_lambdas env rest body)
 
 let mk_global_ref ref inst = Constr.mkRef (ref, inst)
 
@@ -1398,19 +1417,22 @@ let declare_array_all_scheme mind ind_name source_uctx fields projections =
         let proj_ref = Constr.mkConstU (proj_c, source_inst) in
         let array_a rel_a = app array_ref [ reln rel_a ] in
         let proj_a rel_a rel_arr = app proj_ref [ reln rel_a; reln rel_arr ] in
+        let scheme_env = Environ.push_context all_uctx (Global.env ()) in
+        let a_name = Name (Id.of_string "A") in
+        let p_name = Name (Id.of_string "P") in
+        let x_name = Name (Id.of_string "x") in
+        let value_name = Name (Id.of_string "a") in
+        let env_a = push_typed_assum scheme_env a_name a_ty in
+        let motive_ty = typed_prod env_a x_name (reln 1) motive_sort in
+        let env_ap = push_typed_assum env_a p_name motive_ty in
+        let forall_ty =
+          typed_prod env_ap x_name (reln 2) (app (reln 2) [ reln 1 ])
+        in
         let all_body =
           let body = app list_all [ reln 3; reln 2; proj_a 3 1 ] in
-          Constr.mkLambda
-            ( Context.nameR (Id.of_string "A"),
-              a_ty,
-              Constr.mkLambda
-                ( Context.nameR (Id.of_string "P"),
-                  Constr.mkProd
-                    (Context.nameR (Id.of_string "x"), reln 1, motive_sort),
-                  Constr.mkLambda
-                    ( Context.nameR (Id.of_string "a"),
-                      array_a 2,
-                      body ) ) )
+          typed_lambdas scheme_env
+            [ (a_name, a_ty); (p_name, motive_ty); (value_name, array_a 2) ]
+            body
         in
         let univs = (UState.Polymorphic_entry all_uctx, UnivNames.empty_binders) in
         let all_c =
@@ -1422,23 +1444,14 @@ let declare_array_all_scheme mind ind_name source_uctx fields projections =
           let body =
             app list_all_forall [ reln 4; reln 3; reln 2; proj_a 4 1 ]
           in
-          Constr.mkLambda
-            ( Context.nameR (Id.of_string "A"),
-              a_ty,
-              Constr.mkLambda
-                ( Context.nameR (Id.of_string "P"),
-                  Constr.mkProd
-                    (Context.nameR (Id.of_string "x"), reln 1, motive_sort),
-                  Constr.mkLambda
-                    ( qname q motive_univ "h",
-                      Constr.mkProd
-                        ( Context.nameR (Id.of_string "x"),
-                          reln 2,
-                          app (reln 2) [ reln 1 ] ),
-                      Constr.mkLambda
-                        ( Context.nameR (Id.of_string "a"),
-                          array_a 3,
-                          body ) ) ) )
+          typed_lambdas scheme_env
+            [
+              (a_name, a_ty);
+              (p_name, motive_ty);
+              (Name (Id.of_string "h"), forall_ty);
+              (value_name, array_a 3);
+            ]
+            body
         in
         let forall_c =
           quickdef ~name:(all_forall_name ind_name) ~types:None ~univs forall_body
@@ -1466,27 +1479,34 @@ let declare_prod_second_all_scheme mind ind_name source_uctx projections =
     in
     let prod_ref = Constr.mkIndU ((mind, 0), source_inst) in
     let snd_ref = Constr.mkConstU (snd_c, source_inst) in
+    let scheme_env = Environ.push_context all_uctx (Global.env ()) in
+    let a_name = Name (Id.of_string "A") in
+    let b_name = Name (Id.of_string "B") in
+    let p_name = Name (Id.of_string "P") in
+    let x_name = Name (Id.of_string "x") in
+    let value_name = Name (Id.of_string "p") in
+    let env_a = push_typed_assum scheme_env a_name a_ty in
+    let env_ab = push_typed_assum env_a b_name b_ty in
     let motive_ty =
-      Constr.mkProd (Context.nameR (Id.of_string "x"), reln 1, motive_sort)
+      typed_prod env_ab x_name (reln 1) motive_sort
+    in
+    let env_abp = push_typed_assum env_ab p_name motive_ty in
+    let forall_ty =
+      typed_prod env_abp x_name (reln 2) (app (reln 2) [ reln 1 ])
     in
     let prod_ab rel_a rel_b = app prod_ref [ reln rel_a; reln rel_b ] in
     let snd_abp rel_a rel_b rel_p =
       app snd_ref [ reln rel_a; reln rel_b; reln rel_p ]
     in
     let all_body =
-      Constr.mkLambda
-        ( Context.nameR (Id.of_string "A"),
-          a_ty,
-          Constr.mkLambda
-            ( Context.nameR (Id.of_string "B"),
-              b_ty,
-              Constr.mkLambda
-                ( Context.nameR (Id.of_string "P"),
-                  motive_ty,
-                  Constr.mkLambda
-                    ( Context.nameR (Id.of_string "p"),
-                      prod_ab 3 2,
-                      app (reln 2) [ snd_abp 4 3 1 ] ) ) ) )
+      typed_lambdas scheme_env
+        [
+          (a_name, a_ty);
+          (b_name, b_ty);
+          (p_name, motive_ty);
+          (value_name, prod_ab 3 2);
+        ]
+        (app (reln 2) [ snd_abp 4 3 1 ])
     in
     let univs =
       (UState.Polymorphic_entry all_uctx, UnivNames.empty_binders)
@@ -1498,25 +1518,15 @@ let declare_prod_second_all_scheme mind ind_name source_uctx projections =
     DeclareScheme.declare_scheme Libobject.SuperGlobal "All_01"
       (GlobRef.IndRef (mind, 0), all_c);
     let all_forall_body =
-      Constr.mkLambda
-        ( Context.nameR (Id.of_string "A"),
-          a_ty,
-          Constr.mkLambda
-            ( Context.nameR (Id.of_string "B"),
-              b_ty,
-              Constr.mkLambda
-                ( Context.nameR (Id.of_string "P"),
-                  motive_ty,
-                  Constr.mkLambda
-                    ( qname q motive_univ "h",
-                      Constr.mkProd
-                        ( Context.nameR (Id.of_string "x"),
-                          reln 2,
-                          app (reln 2) [ reln 1 ] ),
-                      Constr.mkLambda
-                        ( Context.nameR (Id.of_string "p"),
-                          prod_ab 4 3,
-                          app (reln 2) [ snd_abp 5 4 1 ] ) ) ) ) )
+      typed_lambdas scheme_env
+        [
+          (a_name, a_ty);
+          (b_name, b_ty);
+          (p_name, motive_ty);
+          (Name (Id.of_string "h"), forall_ty);
+          (value_name, prod_ab 4 3);
+        ]
+        (app (reln 2) [ snd_abp 5 4 1 ])
     in
     let all_forall_c =
       quickdef
@@ -1590,23 +1600,25 @@ let declare_last_field_all_scheme mind ind_name source_uctx projections =
       let motive_sort = qsort q motive_univ in
       let ind_ref = Constr.mkIndU ((mind, 0), source_inst) in
       let field_ref = Constr.mkConstU (field_c, source_inst) in
+      let scheme_env = Environ.push_context all_uctx (Global.env ()) in
+      let a_name = a_na.Context.binder_name in
+      let p_name = Name (Id.of_string "P") in
+      let x_name = Name (Id.of_string "x") in
+      let value_name = Name (Id.of_string "value") in
+      let env_a = push_typed_assum scheme_env a_name a_ty in
       let motive_ty =
-        Constr.mkProd
-          (Context.nameR (Id.of_string "x"), reln 1, motive_sort)
+        typed_prod env_a x_name (reln 1) motive_sort
+      in
+      let env_ap = push_typed_assum env_a p_name motive_ty in
+      let forall_ty =
+        typed_prod env_ap x_name (reln 2) (app (reln 2) [ reln 1 ])
       in
       let ind_a rel_a = app ind_ref [ reln rel_a ] in
       let field_ap rel_a rel_p = app field_ref [ reln rel_a; reln rel_p ] in
       let all_body =
-        Constr.mkLambda
-          ( a_na,
-            a_ty,
-            Constr.mkLambda
-              ( Context.nameR (Id.of_string "P"),
-                motive_ty,
-                Constr.mkLambda
-                  ( Context.nameR (Id.of_string "value"),
-                    ind_a 2,
-                    app (reln 2) [ field_ap 3 1 ] ) ) )
+        typed_lambdas scheme_env
+          [ (a_name, a_ty); (p_name, motive_ty); (value_name, ind_a 2) ]
+          (app (reln 2) [ field_ap 3 1 ])
       in
       let univs =
         (UState.Polymorphic_entry all_uctx, UnivNames.empty_binders)
@@ -1617,22 +1629,14 @@ let declare_last_field_all_scheme mind ind_name source_uctx projections =
       DeclareScheme.declare_scheme Libobject.SuperGlobal "All"
         (GlobRef.IndRef (mind, 0), all_c);
       let all_forall_body =
-        Constr.mkLambda
-          ( a_na,
-            a_ty,
-            Constr.mkLambda
-              ( Context.nameR (Id.of_string "P"),
-                motive_ty,
-                Constr.mkLambda
-                  ( qname q motive_univ "h",
-                    Constr.mkProd
-                      ( Context.nameR (Id.of_string "x"),
-                        reln 2,
-                        app (reln 2) [ reln 1 ] ),
-                    Constr.mkLambda
-                      ( Context.nameR (Id.of_string "value"),
-                        ind_a 3,
-                        app (reln 2) [ field_ap 4 1 ] ) ) ) )
+        typed_lambdas scheme_env
+          [
+            (a_name, a_ty);
+            (p_name, motive_ty);
+            (Name (Id.of_string "h"), forall_ty);
+            (value_name, ind_a 3);
+          ]
+          (app (reln 2) [ field_ap 4 1 ])
       in
       let all_forall_c =
         quickdef ~name:(all_forall_name ind_name) ~types:None ~univs
