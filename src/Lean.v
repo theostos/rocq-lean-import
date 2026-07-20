@@ -22,6 +22,10 @@ Inductive eq_inst1@{|} {α:SProp} (a:α) : α -> SProp
 
 Register eq_inst1 as lean.Eq_inst1.
 
+Inductive Bool := Bool_false | Bool_true.
+
+Register Bool as lean.Bool.
+
 (* Inductive List@{u Lean.u+1.0} (α : Type@{Lean.u+1.0}) : Type@{Lean.u+1.0} :=
     List_nil : List@{u Lean.u+1.0} α
   | List_cons : α -> List@{u Lean.u+1.0} α -> List@{u Lean.u+1.0} α. *)
@@ -267,11 +271,30 @@ Fixpoint Nat_sub n m :=
   | Nat_succ m => Nat_pred (Nat_sub n m)
   end.
 
+Fixpoint Nat_beq n m :=
+  match n, m with
+  | Nat_zero, Nat_zero => Bool_true
+  | Nat_succ n, Nat_succ m => Nat_beq n m
+  | _, _ => Bool_false
+  end.
+
+Fixpoint Nat_ble n m :=
+  match n, m with
+  | Nat_zero, _ => Bool_true
+  | Nat_succ _, Nat_zero => Bool_false
+  | Nat_succ n, Nat_succ m => Nat_ble n m
+  end.
+
+Definition Nat_blt n m := Nat_ble (Nat_succ n) m.
+
 Register Nat_add as lean.Nat_add.
 Register Nat_mul as lean.Nat_mul.
 Register Nat_pow as lean.Nat_pow.
 Register Nat_pred as lean.Nat_pred.
 Register Nat_sub as lean.Nat_sub.
+Register Nat_beq as lean.Nat_beq.
+Register Nat_ble as lean.Nat_ble.
+Register Nat_blt as lean.Nat_blt.
 Register Nat_of_N as lean.Nat_of_N.
 
 Import NArith.
@@ -468,6 +491,99 @@ Proof.
   constructor.
 Qed.
 
+(** A checked bridge from Lean's [Bool] to Rocq's [bool].  Like
+    [NatCertificate], it lets the importer evaluate compact host values while
+    requiring a Rocq proof for every result. *)
+Definition bool_of_Bool (b : Bool) : bool :=
+  match b with
+  | Bool_false => false
+  | Bool_true => true
+  end.
+
+Definition Bool_of_bool (b : bool) : Bool :=
+  if b then Bool_true else Bool_false.
+
+Definition BoolCertificate (x : Bool) (b : bool) : Prop :=
+  Logic.eq (bool_of_Bool x) b.
+
+Lemma Bool_of_bool_bool_of_Bool_logic (b : Bool) :
+  Logic.eq (Bool_of_bool (bool_of_Bool b)) b.
+Proof. destruct b; reflexivity. Qed.
+
+Lemma BoolCertificate_of_bool (b : bool) :
+  BoolCertificate (Bool_of_bool b) b.
+Proof. destruct b; reflexivity. Qed.
+
+Lemma BoolCertificate_equal (a b : Bool) (value : bool) :
+  BoolCertificate a value -> BoolCertificate b value -> eq a b.
+Proof.
+  unfold BoolCertificate.
+  intros Ha Hb.
+  assert (Logic.eq a b) as Hab.
+  { apply (f_equal Bool_of_bool) in Ha.
+    apply (f_equal Bool_of_bool) in Hb.
+    rewrite !Bool_of_bool_bool_of_Bool_logic in Ha, Hb.
+    exact (Logic.eq_trans Ha (Logic.eq_sym Hb)). }
+  destruct Hab.
+  constructor.
+Qed.
+
+Lemma bool_of_Nat_beq_logic (a b : Nat) :
+  Logic.eq (bool_of_Bool (Nat_beq a b))
+    (PeanoNat.Nat.eqb (nat_of_Nat a) (nat_of_Nat b)).
+Proof.
+  revert b; induction a as [|a IH]; destruct b; cbn; auto.
+Qed.
+
+Lemma bool_of_Nat_ble_logic (a b : Nat) :
+  Logic.eq (bool_of_Bool (Nat_ble a b))
+    (PeanoNat.Nat.leb (nat_of_Nat a) (nat_of_Nat b)).
+Proof.
+  revert b; induction a as [|a IH]; destruct b; cbn; auto.
+Qed.
+
+Lemma bool_of_Nat_blt_logic (a b : Nat) :
+  Logic.eq (bool_of_Bool (Nat_blt a b))
+    (PeanoNat.Nat.ltb (nat_of_Nat a) (nat_of_Nat b)).
+Proof.
+  unfold Nat_blt.
+  rewrite bool_of_Nat_ble_logic.
+  reflexivity.
+Qed.
+
+Lemma NatCertificate_beq (a b : Nat) (na nb : N) :
+  NatCertificate a na -> NatCertificate b nb ->
+  BoolCertificate (Nat_beq a b) (N.eqb na nb).
+Proof.
+  unfold NatCertificate, BoolCertificate, N_of_Nat.
+  intros Ha Hb.
+  rewrite bool_of_Nat_beq_logic.
+  rewrite PeanoNat.Nat.eqb_compare, N.eqb_compare, Nat2N.inj_compare, Ha, Hb.
+  reflexivity.
+Qed.
+
+Lemma NatCertificate_ble (a b : Nat) (na nb : N) :
+  NatCertificate a na -> NatCertificate b nb ->
+  BoolCertificate (Nat_ble a b) (N.leb na nb).
+Proof.
+  unfold NatCertificate, BoolCertificate, N_of_Nat.
+  intros Ha Hb.
+  rewrite bool_of_Nat_ble_logic.
+  rewrite PeanoNat.Nat.leb_compare, N.leb_compare, Nat2N.inj_compare, Ha, Hb.
+  reflexivity.
+Qed.
+
+Lemma NatCertificate_blt (a b : Nat) (na nb : N) :
+  NatCertificate a na -> NatCertificate b nb ->
+  BoolCertificate (Nat_blt a b) (N.ltb na nb).
+Proof.
+  unfold NatCertificate, BoolCertificate, N_of_Nat.
+  intros Ha Hb.
+  rewrite bool_of_Nat_blt_logic.
+  rewrite PeanoNat.Nat.ltb_compare, N.ltb_compare, Nat2N.inj_compare, Ha, Hb.
+  reflexivity.
+Qed.
+
 Definition Nat_transport_sprop (P : Nat -> SProp)
     (a b : Nat) (e : eq a b) (x : P a) : P b :=
   match e in eq _ b return P b with
@@ -484,6 +600,13 @@ Register NatCertificate_pow as lean.NatCertificate_pow.
 Register NatCertificate_sub as lean.NatCertificate_sub.
 Register NatCertificate_equal as lean.NatCertificate_equal.
 Register Nat_transport_sprop as lean.Nat_transport_sprop.
+Register Bool_of_bool as lean.Bool_of_bool.
+Register BoolCertificate as lean.BoolCertificate.
+Register BoolCertificate_of_bool as lean.BoolCertificate_of_bool.
+Register BoolCertificate_equal as lean.BoolCertificate_equal.
+Register NatCertificate_beq as lean.NatCertificate_beq.
+Register NatCertificate_ble as lean.NatCertificate_ble.
+Register NatCertificate_blt as lean.NatCertificate_blt.
 
 #[local] Set Warnings "-abstract-large-number".
 Definition UInt32_size : Nat := 0x100000000%Nat.

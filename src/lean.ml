@@ -932,6 +932,7 @@ type core_shape = Legacy | Modern
 
 type predeclared_ind_kind =
   | Eq
+  | Bool
   | Nat
   | Nat_le
   | Or
@@ -947,6 +948,9 @@ type predeclared_def_kind =
   | Pow
   | Pred
   | Sub
+  | Beq
+  | Ble
+  | Blt
   | Nat_isValidChar
   | IsValidChar_UInt32
   | IsValidChar_UInt32_match_1_1
@@ -957,6 +961,7 @@ type predeclared_ind_as_def_kind = ULift_cumul
 let get_predeclared_cnames (k : predeclared_ind_kind) n =
   match k with
   | Eq -> [ N.append n "refl" ]
+  | Bool -> [ N.append n "false"; N.append n "true" ]
   | Nat -> [ N.append n "zero"; N.append n "succ" ]
   | Nat_le -> [ N.append n "refl"; N.append n "step" ]
   | Or -> [ N.append n "inl"; N.append n "inr" ]
@@ -984,6 +989,7 @@ let get_predeclared_ind_any ~ctors ~uint32_is_legacy n i =
       |> Option.map (fun x -> (indk, indh, x)))
     [
       (Eq, [ "Eq" ]);
+      (Bool, [ "Bool" ]);
       (Nat, [ "Nat" ]);
       (Nat_le, [ "Nat"; "le" ]);
       (Or, [ "Or" ]);
@@ -1029,6 +1035,9 @@ let get_predeclared_def_any n i =
       (Pow, [ "Nat" ; "pow" ]);
       (Pred, [ "Nat"; "pred" ]);
       (Sub, [ "Nat"; "sub" ]);
+      (Beq, [ "Nat"; "beq" ]);
+      (Ble, [ "Nat"; "ble" ]);
+      (Blt, [ "Nat"; "blt" ]);
       (Nat_isValidChar, [ "Nat"; "isValidChar" ]);
       ( IsValidChar_UInt32_match_1_1,
         [ "_private"; "Init"; "Prelude0"; "isValidChar_UInt32"; "match_1_1" ]
@@ -3733,6 +3742,9 @@ and declare_def { name = n; ty; body; univs; } i =
           | Pow
           | Pred
           | Sub
+          | Beq
+          | Ble
+          | Blt
           | Nat_isValidChar
           | IsValidChar_UInt32
           | IsValidChar_UInt32_match_1_1
@@ -3904,7 +3916,8 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
         squashy,
         [] )
     | Some
-        ( ( ( Nat
+        ( ( ( Bool
+            | Nat
             | Nat_le
             | Or
             | And
