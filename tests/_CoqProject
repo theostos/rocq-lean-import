@@ -11,3 +11,4 @@ ulift.v
 rec_single_ctor.v
 universe_instances.v
 projection_relevance.v
+mutual_inductives.v
