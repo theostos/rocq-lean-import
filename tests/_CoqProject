@@ -10,6 +10,7 @@ pnni.v
 ulift.v
 rec_single_ctor.v
 lowercase_hex.v
+punctuation_name.v
 universe_instances.v
 projection_relevance.v
 mutual_inductives.v
