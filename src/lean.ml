@@ -1025,7 +1025,7 @@ let mk_string char string list char_uinst mkChar s =
   Constr.(mkApp (mkConstructU ((string, 1), UVars.Instance.empty), [| ls |]))
 
 (* [c] has type [indu] applied to [args] *)
-let unfold_proj_case env evd ~field ~indu ~mib ~mip ~args c =
+let rec unfold_proj_case env evd ~field ~indu ~mib ~mip ~args c =
   let ind = fst indu in
   let npar = mib.Declarations.mind_nparams in
   let ntypes = Declareops.mind_ntypes mib in
@@ -1048,14 +1048,34 @@ let unfold_proj_case env evd ~field ~indu ~mib ~mip ~args c =
     }
   in
   let params = Array.map EConstr.Unsafe.to_constr (Array.sub args 0 npar) in
-  let field_ty =
+  let self_annot = Context.make_annot Name.Anonymous mip.mind_relevance in
+  let self_ty =
+    Constr.mkApp
+      (Constr.mkIndU indu, Array.map EConstr.Unsafe.to_constr args)
+  in
+  let env_self =
+    Environ.push_rel
+      (Context.Rel.Declaration.LocalAssum (self_annot, self_ty)) env
+  in
+  let args_self =
+    Array.map
+      (fun arg ->
+        EConstr.of_constr (Vars.lift 1 (EConstr.Unsafe.to_constr arg)))
+      args
+  in
+  let ret_ty =
     let ctor = Constr.mkConstructU (((fst ind, 0), 1), u) in
     let ctor_applied = Constr.mkApp (ctor, params) in
     let rec get_field_type i ty =
       match Constr.kind ty with
       | Constr.Prod (_, t, rest) ->
         if i = field then t
-        else get_field_type (i + 1) (Vars.subst1 invalid rest)
+        else
+          let previous =
+            unfold_proj_case env_self evd ~field:i ~indu ~mib ~mip
+              ~args:args_self (Constr.mkRel 1)
+          in
+          get_field_type (i + 1) (Vars.subst1 previous rest)
       | _ -> assert false
     in
     let ctor_ty =
@@ -1064,11 +1084,12 @@ let unfold_proj_case env evd ~field ~indu ~mib ~mip ~args c =
     let ctor_ty =
       EConstr.Unsafe.to_constr (Reductionops.whd_all env evd ctor_ty)
     in
-    get_field_type 0 ctor_ty
+    get_field_type 0 (Vars.lift 1 ctor_ty)
   in
-  let case_relev = mip.mind_relevance in
-  let self_annot = Context.make_annot Name.Anonymous mip.mind_relevance in
-  let ret_ty = Vars.lift 1 field_ty in
+  let case_relev =
+    EConstr.Unsafe.to_relevance
+      (Retyping.relevance_of_type env_self evd (EConstr.of_constr ret_ty))
+  in
   let p = ([| self_annot |], ret_ty) in
   let branch_nas =
     Array.of_list (List.rev_map Context.Rel.Declaration.get_annot ctor_ctx)
