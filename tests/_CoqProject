@@ -20,3 +20,4 @@ nested_record_containers.v
 nested_record_eligibility.v
 sprop_record_scheme.v
 string_of_list.v
+lowercase_hex.v
