@@ -266,6 +266,12 @@ Register UInt32_size as lean.UInt32_size.
 Record Fin@{} (n : Nat) := Fin_mk { val : Nat; isLt : (val < n)%Nat }.
 Register Fin as lean.Fin.
 
+(* UInt32 used a Fin field before Lean 4.17 and a BitVec field afterwards.
+   Keep both kernel-level representations available; the importer selects the
+   one matching the constructor type in the dump. *)
+Record UInt32_legacy@{} := UInt32_legacy_mk { val0 : Fin UInt32_size }.
+Register UInt32_legacy as lean.UInt32.legacy.
+
 Record BitVec@{} (w : Nat) := BitVec_ofFin { toFin : Fin (Nat_pow 2 w) }.
 Register BitVec as lean.BitVec.
 
@@ -321,6 +327,10 @@ Section strings.
   Definition Nat_isValidChar (n : Nat) : SProp
     := n < 0xd800 \/ (0xdfff < n /\ n < 0x110000).
 
+  Record Char_legacy@{} := Char_legacy_mk
+  { val1_legacy : UInt32_legacy;
+    valid_legacy : Nat_isValidChar val1_legacy.(val0).(val _) }.
+
   Record Char@{} := Char_mk
   { val1 : UInt32; valid : Nat_isValidChar val1.(toBitVec).(toFin _).(val _) }.
 
@@ -364,6 +374,14 @@ Section strings.
   Definition Fin_mk_N_pow (n : N) (val : N) (isLt : (val <? 2 ^ n)%N = true) : Fin (Nat_pow 2 (Nat_of_N n))
     := Fin_mk (Nat_pow 2 (Nat_of_N n)) (Nat_of_N val) (Nat_lt_to_N_pow val n isLt).
 
+  Definition Fin_mk_N (n : N) (val : N) (isLt : (val <? n)%N = true)
+    : Fin (Nat_of_N n) :=
+    Fin_mk (Nat_of_N n) (Nat_of_N val) (Nat_lt_to_N val n isLt).
+
+  Definition UInt32_legacy_mk_N
+    (val : N) (isLt : (val <? 0x100000000)%N = true) : UInt32_legacy :=
+    UInt32_legacy_mk (Fin_mk_N 0x100000000 val isLt).
+
   Definition UInt32_mk_N (val : N) (isLt : (val <? 0x100000000)%N = true) : UInt32
     := UInt32_ofBitVec (BitVec_ofFin 32 (Fin_mk_N_pow 32 val isLt)).
 
@@ -394,6 +412,14 @@ Section strings.
   Definition Char_mk_N (val : N) (isLt : ((val <? 0x100000000)%N && check_N_isValidChar val)%bool = true) : Char
     := Char_mk (UInt32_mk_N val (proj1 (andb_prop _ _ isLt))) (Nat_isValidChar_mk_N val (proj2 (andb_prop _ _ isLt))).
 
+  Definition Char_legacy_mk_N
+    (val : N)
+    (isLt : ((val <? 0x100000000)%N && check_N_isValidChar val)%bool = true)
+    : Char_legacy :=
+    Char_legacy_mk
+      (UInt32_legacy_mk_N val (proj1 (andb_prop _ _ isLt)))
+      (Nat_isValidChar_mk_N val (proj2 (andb_prop _ _ isLt))).
+
   Definition reflective_Char_mk (val : N)
     : if ((val <? 0x100000000)%N && check_N_isValidChar val)%bool
       then Char
@@ -406,6 +432,19 @@ Section strings.
 
   Definition reflective_Char_mk_prim (val : Uint63.int)
     := reflective_Char_mk (Z.to_N (Uint63.to_Z val)).
+
+  Definition reflective_Char_legacy_mk (val : N)
+    : if ((val <? 0x100000000)%N && check_N_isValidChar val)%bool
+      then Char_legacy
+      else InvalidChar val
+    := let isLt := ((val <? 0x100000000)%N && check_N_isValidChar val)%bool in
+       match isLt return ((val <? 0x100000000)%N && check_N_isValidChar val)%bool = isLt -> if isLt then Char_legacy else InvalidChar val with
+       | true => fun H => Char_legacy_mk_N val H
+       | false => fun _ => invalid_char val
+       end Logic.eq_refl.
+
+  Definition reflective_Char_legacy_mk_prim (val : Uint63.int)
+    := reflective_Char_legacy_mk (Z.to_N (Uint63.to_Z val)).
 
 
   (* Definition reflective_UInt32_mk (val : N) : if (val <? 0x100000000)%N
@@ -457,7 +496,9 @@ End strings.
 
 Register Nat_isValidChar as lean.Nat_isValidChar.
 Register Char as lean.Char.
+Register Char_legacy as lean.Char.legacy.
 Register reflective_Char_mk_prim as lean.Char.mk.reflective_prim.
+Register reflective_Char_legacy_mk_prim as lean.Char.legacy.mk.reflective_prim.
 
 Goal forall a n, Nat_pow a (Nat_succ n) = Nat_mul (Nat_pow a n) a.
 Proof.
