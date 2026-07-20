@@ -916,7 +916,17 @@ let get_predeclared_def defn n i =
     | exception _ -> None
   else None
 
-type predeclared_ind_kind = Eq | Nat | Nat_le | Or | And | Fin | UInt32 | BitVec | Char
+type predeclared_ind_kind =
+  | Eq
+  | Bool
+  | Nat
+  | Nat_le
+  | Or
+  | And
+  | Fin
+  | UInt32
+  | BitVec
+  | Char
 type predeclared_def_kind =
   | UInt32_size
   | Add
@@ -924,12 +934,16 @@ type predeclared_def_kind =
   | Pow
   | Pred
   | Sub
+  | Beq
+  | Ble
+  | Blt
   | Nat_isValidChar
 type predeclared_ind_as_def_kind = ULift_cumul
 
 let get_predeclared_cnames (k : predeclared_ind_kind) n =
   match k with
   | Eq -> [ N.append n "refl" ]
+  | Bool -> [ N.append n "false"; N.append n "true" ]
   | Nat -> [ N.append n "zero"; N.append n "succ" ]
   | Nat_le -> [ N.append n "refl"; N.append n "step" ]
   | Or -> [ N.append n "inl"; N.append n "inr" ]
@@ -945,6 +959,7 @@ let get_predeclared_ind_any n i =
       get_predeclared_ind indh n i |> Option.map (fun x -> (indk, indh, x)))
     [
       (Eq, [ "Eq" ]);
+      (Bool, [ "Bool" ]);
       (Nat, [ "Nat" ]);
       (Nat_le, [ "Nat"; "le" ]);
       (Or, [ "Or" ]);
@@ -990,6 +1005,9 @@ let get_predeclared_def_any n i =
       (Pow, [ "Nat" ; "pow" ]);
       (Pred, [ "Nat"; "pred" ]);
       (Sub, [ "Nat"; "sub" ]);
+      (Beq, [ "Nat"; "beq" ]);
+      (Ble, [ "Nat"; "ble" ]);
+      (Blt, [ "Nat"; "blt" ]);
       (Nat_isValidChar, [ "Nat"; "isValidChar" ]);
     ]
 
@@ -3361,6 +3379,9 @@ and declare_def { name = n; ty; body; univs; } i =
           | Pow
           | Pred
           | Sub
+          | Beq
+          | Ble
+          | Blt
           | Nat_isValidChar ),
           _,
           (def_name, c) ) ->
@@ -3525,7 +3546,15 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
         squashy,
         [] )
     | Some
-        ( ((Nat | Nat_le | Or | And | Fin | UInt32 | BitVec | Char) as k),
+        ( ( ( Bool
+            | Nat
+            | Nat_le
+            | Or
+            | And
+            | Fin
+            | UInt32
+            | BitVec
+            | Char ) as k ),
           _,
           (ind_name, mind) ) ->
       (* Hack to let the user predeclare various types before running Lean Import
