@@ -716,7 +716,8 @@ let start_uconv univs i =
   in
   aux uconv i univs
 
-let univ_entry_gen { map; levels; direct; graph } ounivs =
+let univ_entry_gen ?(drop_global_lower_bounds = false)
+    { map; levels; direct; graph } ounivs =
   let original_pairs =
     CList.map_filter
       (fun u ->
@@ -731,6 +732,11 @@ let univ_entry_gen { map; levels; direct; graph } ounivs =
   let original_subst = snd (make_instance_subst original_instance) in
   let direct_pairs =
     List.filter (fun (_, l) -> Level.Set.mem l direct) original_pairs
+  in
+  let direct_set =
+    List.fold_left
+      (fun kept (_, l) -> Level.Set.add l kept)
+      Level.Set.empty direct_pairs
   in
   let extra_pairs =
     Universe.Map.fold (fun alg l acc -> (alg, l) :: acc) levels [] |> List.rev
@@ -748,7 +754,11 @@ let univ_entry_gen { map; levels; direct; graph } ounivs =
   let csts = UGraph.constraints_for ~kept graph in
   let csts =
     UnivConstraints.filter
-      (fun (a, _, b) -> Level.Set.mem a uset || Level.Set.mem b uset)
+      (fun (a, _, b) ->
+        if drop_global_lower_bounds then
+          (Level.Set.mem a uset && Level.Set.mem b uset)
+          || Level.Set.mem a direct_set || Level.Set.mem b direct_set
+        else Level.Set.mem a uset || Level.Set.mem b uset)
       csts
   in
   let unames =
@@ -1200,6 +1210,644 @@ let lcnt = ref 0
 let line_msg name =
   Feedback.msg_info Pp.(str "line " ++ int !lcnt ++ str ": " ++ N.pp name)
 
+let list_name = N.append N.anon "List"
+let array_name = N.append N.anon "Array"
+let prod_name = N.append N.anon "Prod"
+
+let array_minds : MutInd.t list ref =
+  Summary.ref ~name:"lean-array-minds" []
+
+let prod_minds : MutInd.t list ref =
+  Summary.ref ~name:"lean-prod-minds" []
+
+type nested_array_focus = FocusMain | FocusArray | FocusList | FocusProd
+
+type nested_array_shape = ArraySelf | ArrayProdSecond
+
+type nested_array_rec_info = {
+  base_rec : N.t;
+  nparams : int;
+  nctors : int;
+  focus : nested_array_focus;
+  shape : nested_array_shape;
+}
+
+let nested_array_rec_info : nested_array_rec_info N.Map.t ref =
+  Summary.ref ~name:"lean-nested-array-recursor-info" N.Map.empty
+
+let append_array a b = Array.append a b
+
+
+
+let extended_all_uctx source_uctx =
+  let source_inst = UContext.instance source_uctx in
+  let source_names = UContext.names source_uctx in
+  let qinst, uinst = Instance.to_array source_inst in
+  let q = Sorts.Quality.var (Array.length qinst) in
+  let u = Level.var (Array.length uinst) in
+  let names =
+    {
+      quals = append_array source_names.quals [| Name (Id.of_string "s") |];
+      univs = append_array source_names.univs [| Name (Id.of_string "motive") |];
+    }
+  in
+  let inst = Instance.of_array (append_array qinst [| q |], append_array uinst [| u |]) in
+  (UContext.make names (inst, UContext.constraints source_uctx), source_inst, q, u)
+
+let qsort q u = Constr.mkSort (Sorts.make q u)
+
+let qname q u id =
+  Context.make_annot
+    (Name (Id.of_string id))
+    (Sorts.relevance_of_sort (Sorts.make q u))
+
+let reln n = Constr.mkRel n
+
+let app f args = Constr.mkApp (f, Array.of_list args)
+
+let mk_global_ref ref inst = Constr.mkRef (ref, inst)
+
+let all_name ind_name = Id.of_string (Id.to_string ind_name ^ "_all")
+let all_forall_name ind_name =
+  Id.of_string (Id.to_string ind_name ^ "_all_forall")
+
+let dest_nested_ind_app c =
+  let hd, args = Constr.decompose_app c in
+  match Constr.kind hd with
+  | Ind (ind, inst) -> Some (ind, inst, args)
+  | _ -> None
+
+let declare_array_all_scheme mind ind_name source_uctx fields projections =
+  match (fields, projections) with
+  | [ (_, field_ty) ], [ { Structures.Structure.proj_body = Some proj_c; _ } ] -> (
+    match dest_nested_ind_app (EConstr.Unsafe.to_constr field_ty) with
+    | Some (list_ind, list_inst, field_args) when Array.length field_args = 1 -> (
+      match
+        ( DeclareScheme.lookup_scheme_opt "All" (GlobRef.IndRef list_ind),
+          DeclareScheme.lookup_scheme_opt "AllForall" (GlobRef.IndRef list_ind) )
+      with
+      | Some list_all_ref, Some list_all_forall_ref ->
+        let all_uctx, source_inst, q, motive_level =
+          extended_all_uctx source_uctx
+        in
+        let motive_univ = Universe.make motive_level in
+        let a_ty =
+          let params = (Global.lookup_mind mind).mind_params_ctxt in
+          match params with
+          | [ RelDecl.LocalAssum (_, ty) ] -> ty
+          | _ -> Constr.mkSet
+        in
+        let motive_sort = qsort q motive_univ in
+        let qinst, uinst = Instance.to_array list_inst in
+        let list_all_inst =
+          Instance.of_array
+            ( append_array qinst [| q |],
+              append_array uinst [| motive_level |] )
+        in
+        let list_all = mk_global_ref list_all_ref list_all_inst in
+        let list_all_forall = mk_global_ref list_all_forall_ref list_all_inst in
+        let array_ref = Constr.mkIndU ((mind, 0), source_inst) in
+        let proj_ref = Constr.mkConstU (proj_c, source_inst) in
+        let array_a rel_a = app array_ref [ reln rel_a ] in
+        let proj_a rel_a rel_arr = app proj_ref [ reln rel_a; reln rel_arr ] in
+        let all_body =
+          let body = app list_all [ reln 3; reln 2; proj_a 3 1 ] in
+          Constr.mkLambda
+            ( Context.nameR (Id.of_string "A"),
+              a_ty,
+              Constr.mkLambda
+                ( Context.nameR (Id.of_string "P"),
+                  Constr.mkProd
+                    (Context.nameR (Id.of_string "x"), reln 1, motive_sort),
+                  Constr.mkLambda
+                    ( Context.nameR (Id.of_string "a"),
+                      array_a 2,
+                      body ) ) )
+        in
+        let univs = (UState.Polymorphic_entry all_uctx, UnivNames.empty_binders) in
+        let all_c =
+          quickdef ~name:(all_name ind_name) ~types:None ~univs all_body
+        in
+        DeclareScheme.declare_scheme Libobject.SuperGlobal "All"
+          (GlobRef.IndRef (mind, 0), all_c);
+        let forall_body =
+          let body =
+            app list_all_forall [ reln 4; reln 3; reln 2; proj_a 4 1 ]
+          in
+          Constr.mkLambda
+            ( Context.nameR (Id.of_string "A"),
+              a_ty,
+              Constr.mkLambda
+                ( Context.nameR (Id.of_string "P"),
+                  Constr.mkProd
+                    (Context.nameR (Id.of_string "x"), reln 1, motive_sort),
+                  Constr.mkLambda
+                    ( qname q motive_univ "h",
+                      Constr.mkProd
+                        ( Context.nameR (Id.of_string "x"),
+                          reln 2,
+                          app (reln 2) [ reln 1 ] ),
+                      Constr.mkLambda
+                        ( Context.nameR (Id.of_string "a"),
+                          array_a 3,
+                          body ) ) ) )
+        in
+        let forall_c =
+          quickdef ~name:(all_forall_name ind_name) ~types:None ~univs forall_body
+        in
+        DeclareScheme.declare_scheme Libobject.SuperGlobal "AllForall"
+          (GlobRef.IndRef (mind, 0), forall_c)
+      | _ -> ())
+    | _ -> ())
+  | _ -> ()
+
+let declare_prod_second_all_scheme mind ind_name source_uctx projections =
+  match projections with
+  | [ _; { Structures.Structure.proj_body = Some snd_c; _ } ] ->
+    let all_uctx, source_inst, q, motive_level =
+      extended_all_uctx source_uctx
+    in
+    let motive_univ = Universe.make motive_level in
+    let motive_sort = qsort q motive_univ in
+    let params = (Global.lookup_mind mind).mind_params_ctxt in
+    let a_ty, b_ty =
+      match params with
+      | [ RelDecl.LocalAssum (_, b_ty); RelDecl.LocalAssum (_, a_ty) ] ->
+        (a_ty, b_ty)
+      | _ -> (Constr.mkSet, Constr.mkSet)
+    in
+    let prod_ref = Constr.mkIndU ((mind, 0), source_inst) in
+    let snd_ref = Constr.mkConstU (snd_c, source_inst) in
+    let motive_ty =
+      Constr.mkProd (Context.nameR (Id.of_string "x"), reln 1, motive_sort)
+    in
+    let prod_ab rel_a rel_b = app prod_ref [ reln rel_a; reln rel_b ] in
+    let snd_abp rel_a rel_b rel_p =
+      app snd_ref [ reln rel_a; reln rel_b; reln rel_p ]
+    in
+    let all_body =
+      Constr.mkLambda
+        ( Context.nameR (Id.of_string "A"),
+          a_ty,
+          Constr.mkLambda
+            ( Context.nameR (Id.of_string "B"),
+              b_ty,
+              Constr.mkLambda
+                ( Context.nameR (Id.of_string "P"),
+                  motive_ty,
+                  Constr.mkLambda
+                    ( Context.nameR (Id.of_string "p"),
+                      prod_ab 3 2,
+                      app (reln 2) [ snd_abp 4 3 1 ] ) ) ) )
+    in
+    let univs =
+      (UState.Polymorphic_entry all_uctx, UnivNames.empty_binders)
+    in
+    let all_c =
+      quickdef ~name:(Id.of_string (Id.to_string ind_name ^ "_all_01"))
+        ~types:None ~univs all_body
+    in
+    DeclareScheme.declare_scheme Libobject.SuperGlobal "All_01"
+      (GlobRef.IndRef (mind, 0), all_c);
+    let all_forall_body =
+      Constr.mkLambda
+        ( Context.nameR (Id.of_string "A"),
+          a_ty,
+          Constr.mkLambda
+            ( Context.nameR (Id.of_string "B"),
+              b_ty,
+              Constr.mkLambda
+                ( Context.nameR (Id.of_string "P"),
+                  motive_ty,
+                  Constr.mkLambda
+                    ( qname q motive_univ "h",
+                      Constr.mkProd
+                        ( Context.nameR (Id.of_string "x"),
+                          reln 2,
+                          app (reln 2) [ reln 1 ] ),
+                      Constr.mkLambda
+                        ( Context.nameR (Id.of_string "p"),
+                          prod_ab 4 3,
+                          app (reln 2) [ snd_abp 5 4 1 ] ) ) ) ) )
+    in
+    let all_forall_c =
+      quickdef
+        ~name:
+          (Id.of_string (Id.to_string ind_name ^ "_all_forall_01"))
+        ~types:None ~univs all_forall_body
+    in
+    DeclareScheme.declare_scheme Libobject.SuperGlobal "AllForall_01"
+      (GlobRef.IndRef (mind, 0), all_forall_c)
+  | _ -> ()
+
+let rec decompose_lean_app acc = function
+  | App (f, x) -> decompose_lean_app (x :: acc) f
+  | head -> (head, acc)
+
+let constr_app f args =
+  match args with [] -> f | _ -> Constr.mkApp (f, Array.of_list args)
+
+let whd_constr env evd c =
+  EConstr.Unsafe.to_constr
+    (Reductionops.whd_all env evd (EConstr.of_constr c))
+
+let anon_annot_for_type env evd ty =
+  Context.make_annot Name.Anonymous
+    (EConstr.Unsafe.to_relevance
+       (Retyping.relevance_of_type env evd (EConstr.of_constr ty)))
+
+let prod_domain env evd ty =
+  match Constr.kind (whd_constr env evd ty) with
+  | Prod (_, domain, _) -> domain
+  | _ -> CErrors.user_err Pp.(str "Nested recursor is over-applied")
+
+let prod_after_apply env evd ty arg =
+  match Constr.kind (whd_constr env evd ty) with
+  | Prod (_, _, body) -> Vars.subst1 arg body
+  | _ -> CErrors.user_err Pp.(str "Nested recursor is over-applied")
+
+let list_all_info env evd ty =
+  let ty = whd_constr env evd ty in
+  let head, args = Constr.decompose_app ty in
+  match Constr.kind head with
+  | Ind ((mind, _) as ind, inst)
+    when Array.length args = 3
+         && String.ends_with
+              ~suffix:"_all"
+              (Id.to_string
+                 (Global.lookup_mind mind).mind_packets.(snd ind).mind_typename)
+    -> Some (ind, inst, args)
+  | _ -> None
+
+let nested_list_fold env evd ~depth ~motive_list ~nil_case ~cons_case
+    ~prod_case ~all_term ~all_inst ~all_ind ~all_args =
+  let open Constr in
+  let qinst, uinst = Instance.to_array all_inst in
+  if Array.length uinst = 0 then
+    CErrors.user_err Pp.(str "Nested List.All has no motive universe");
+  let motive_level = uinst.(Array.length uinst - 1) in
+  let all_head = mkIndU (all_ind, all_inst) in
+  let a = all_args.(0) in
+  let p = all_args.(1) in
+  let list = all_args.(2) in
+  let motive_family =
+    let motive_at_list = constr_app motive_list [ list ] in
+    let sort =
+      whd_constr env evd
+        (EConstr.Unsafe.to_constr
+           (Retyping.get_type_of env evd (EConstr.of_constr motive_at_list)))
+    in
+    match kind sort with
+    | Sort sort -> UnivGen.QualityOrSet.of_sort sort
+    | _ -> CErrors.user_err Pp.(str "Nested List motive is not a type")
+  in
+  let motive_is_sprop = UnivGen.QualityOrSet.is_sprop motive_family in
+  (* An erased nested motive needs the SProp eliminator: forcing the Type
+     eliminator changes the expected relevance of its recursive hypotheses. *)
+  let rect_family =
+    if motive_is_sprop then UnivGen.QualityOrSet.sprop
+    else UnivGen.QualityOrSet.qtype
+  in
+  let rect_inst =
+    if motive_is_sprop then all_inst
+    else Instance.of_array (qinst, append_array uinst [| motive_level |])
+  in
+  let rect_ref =
+    Elimschemes.lookup_eliminator env all_ind rect_family
+  in
+  let rect = mkRef (rect_ref, rect_inst) in
+  let list_ty =
+    EConstr.Unsafe.to_constr
+      (Retyping.get_type_of env evd (EConstr.of_constr list))
+  in
+  let motive_list_here = Vars.lift depth motive_list in
+  let motive =
+    let list_annot = anon_annot_for_type env evd list_ty in
+    let env_list =
+      Environ.push_rel (RelDecl.LocalAssum (list_annot, list_ty)) env
+    in
+    let all_l =
+      constr_app (Vars.lift 2 all_head)
+        [ Vars.lift 1 a; Vars.lift 1 p; mkRel 1 ]
+    in
+    let all_l_annot = anon_annot_for_type env_list evd all_l in
+    let body = constr_app (Vars.lift 2 motive_list_here) [ mkRel 2 ] in
+    mkLambda
+      ( list_annot,
+        list_ty,
+        mkLambda (all_l_annot, all_l, body) )
+  in
+  let cons_branch =
+    let a_here = a in
+    let p_here = p in
+    let list_ty_here = list_ty in
+    let head_ty = a_here in
+    let head_annot = anon_annot_for_type env evd head_ty in
+    let env_head =
+      Environ.push_rel (RelDecl.LocalAssum (head_annot, head_ty)) env
+    in
+    let p_head_ty = constr_app (Vars.lift 1 p_here) [ mkRel 1 ] in
+    let p_head_annot = anon_annot_for_type env_head evd p_head_ty in
+    let env_p_head =
+      Environ.push_rel
+        (RelDecl.LocalAssum (p_head_annot, p_head_ty))
+        env_head
+    in
+    let tail_ty = Vars.lift 2 list_ty_here in
+    let tail_annot = anon_annot_for_type env_p_head evd tail_ty in
+    let env_tail =
+      Environ.push_rel (RelDecl.LocalAssum (tail_annot, tail_ty)) env_p_head
+    in
+    let all_tail_ty =
+      constr_app (Vars.lift 3 all_head)
+        [ Vars.lift 3 a_here; Vars.lift 3 p_here; mkRel 1 ]
+    in
+    let all_tail_annot = anon_annot_for_type env_tail evd all_tail_ty in
+    let env_all_tail =
+      Environ.push_rel
+        (RelDecl.LocalAssum (all_tail_annot, all_tail_ty))
+        env_tail
+    in
+    let ih_ty =
+      constr_app (Vars.lift 4 motive_list_here) [ mkRel 2 ]
+    in
+    let ih_annot = anon_annot_for_type env_all_tail evd ih_ty in
+    let body =
+      let head_ih =
+        match prod_case with
+        | None -> mkRel 4
+        | Some prod_case ->
+          let prod_head, _ = decompose_app a_here in
+          let prod_ind, _ =
+            match kind prod_head with
+            | Ind (ind, inst) -> (ind, inst)
+            | _ -> CErrors.user_err Pp.(str "Nested element is not a Prod")
+          in
+          let mib = Global.lookup_mind (fst prod_ind) in
+          let fst_p, fst_r =
+            Declareops.inductive_make_projection prod_ind mib ~proj_arg:0
+          in
+          let snd_p, snd_r =
+            Declareops.inductive_make_projection prod_ind mib ~proj_arg:1
+          in
+          let head = mkRel 5 in
+          let fst = mkProj (Projection.make fst_p false, fst_r, head) in
+          let snd = mkProj (Projection.make snd_p false, snd_r, head) in
+          constr_app (Vars.lift (depth + 5) prod_case)
+            [ fst; snd; mkRel 4 ]
+      in
+      constr_app (Vars.lift (depth + 5) cons_case)
+        [ mkRel 5; mkRel 3; head_ih; mkRel 1 ]
+    in
+    mkLambda
+      ( head_annot,
+        head_ty,
+        mkLambda
+          ( p_head_annot,
+            p_head_ty,
+            mkLambda
+              ( tail_annot,
+                tail_ty,
+                mkLambda
+                  ( all_tail_annot,
+                    all_tail_ty,
+                    mkLambda (ih_annot, ih_ty, body) ) ) ) )
+  in
+  let folded =
+    constr_app rect
+      [
+        a;
+        p;
+        motive;
+        Vars.lift depth nil_case;
+        cons_branch;
+        list;
+        all_term;
+      ]
+  in
+  (list, folded)
+
+let nested_array_fold env evd ~depth ~motive_list ~array_case ~nil_case
+    ~cons_case ~prod_case ~all_inst ~all_ind ~all_args =
+  let list, folded =
+    nested_list_fold env evd ~depth ~motive_list ~nil_case ~cons_case
+      ~prod_case ~all_term:(Constr.mkRel 1) ~all_inst ~all_ind ~all_args
+  in
+  constr_app (Vars.lift depth array_case) [ list; folded ]
+
+let adapt_nested_array_branch env evd ~motive_list ~array_case ~nil_case
+    ~cons_case ~prod_case branch_ty branch =
+  let rec loop env depth ty mapped =
+    let ty = whd_constr env evd ty in
+    match Constr.kind ty with
+    | Prod (annot, binder_ty, body) ->
+      let all_info = list_all_info env evd binder_ty in
+      let env' =
+        Environ.push_rel
+          (RelDecl.LocalAssum (annot, binder_ty))
+          env
+      in
+      let mapped = List.map (Vars.lift 1) mapped in
+      let mapped_arg =
+        match all_info with
+        | None -> Constr.mkRel 1
+        | Some (all_ind, all_inst, all_args) ->
+          let all_args = Array.map (Vars.lift 1) all_args in
+          nested_array_fold env' evd ~depth:(depth + 1) ~motive_list
+            ~array_case ~nil_case ~cons_case ~prod_case ~all_inst ~all_ind
+            ~all_args
+      in
+      let inner = loop env' (depth + 1) body (mapped @ [ mapped_arg ]) in
+      Constr.mkLambda (annot, binder_ty, inner)
+    | _ -> constr_app (Vars.lift depth branch) mapped
+  in
+  loop env 0 branch_ty []
+
+let nested_list_all_forall env evd recursor motive main_rec list =
+  let list_ty =
+    whd_constr env evd
+      (EConstr.Unsafe.to_constr
+         (Retyping.get_type_of env evd (EConstr.of_constr list)))
+  in
+  let list_head, list_args = Constr.decompose_app list_ty in
+  let list_ind, list_inst =
+    match Constr.kind list_head with
+    | Ind (ind, inst) when Array.length list_args = 1 -> (ind, inst)
+    | _ -> CErrors.user_err Pp.(str "Nested Array projection is not a List")
+  in
+  let all_ind, all_forall_ref =
+    match
+      ( DeclareScheme.lookup_scheme_opt "All" (GlobRef.IndRef list_ind),
+        DeclareScheme.lookup_scheme_opt "AllForall" (GlobRef.IndRef list_ind) )
+    with
+    | Some (GlobRef.IndRef all_ind), Some all_forall_ref ->
+      (all_ind, all_forall_ref)
+    | _ -> CErrors.user_err Pp.(str "Nested List schemes are unavailable")
+  in
+  let _, rec_inst = Constr.destConst recursor in
+  let _, rec_levels = Instance.to_array rec_inst in
+  if Array.length rec_levels = 0 then
+    CErrors.user_err Pp.(str "Nested recursor has no motive universe");
+  let motive_level = rec_levels.(0) in
+  let list_qs, list_levels = Instance.to_array list_inst in
+  let all_inst =
+    Instance.of_array
+      ( append_array list_qs [| Sorts.Quality.qtype |],
+        append_array list_levels [| motive_level |] )
+  in
+  let all_forall = Constr.mkRef (all_forall_ref, all_inst) in
+  let a = list_args.(0) in
+  let all_term = constr_app all_forall [ a; motive; main_rec; list ] in
+  let all_args = [| a; motive; list |] in
+  (all_ind, all_inst, all_args, all_term)
+
+let prod_parts env evd prod =
+  let prod_ty =
+    whd_constr env evd
+      (EConstr.Unsafe.to_constr
+         (Retyping.get_type_of env evd (EConstr.of_constr prod)))
+  in
+  let prod_head, _ = Constr.decompose_app prod_ty in
+  let prod_ind =
+    match Constr.kind prod_head with
+    | Ind (ind, _) -> ind
+    | _ -> CErrors.user_err Pp.(str "Nested recursor target is not a Prod")
+  in
+  let mib = Global.lookup_mind (fst prod_ind) in
+  let fst_p, fst_r =
+    Declareops.inductive_make_projection prod_ind mib ~proj_arg:0
+  in
+  let snd_p, snd_r =
+    Declareops.inductive_make_projection prod_ind mib ~proj_arg:1
+  in
+  ( Constr.mkProj (Projection.make fst_p false, fst_r, prod),
+    Constr.mkProj (Projection.make snd_p false, snd_r, prod) )
+
+let adapt_nested_array_recursor env evd info recursor args =
+  let nctors = info.nctors in
+  let nmotives, ncontainer_cases =
+    match info.shape with ArraySelf -> (3, 3) | ArrayProdSecond -> (4, 4)
+  in
+  let needed = info.nparams + nmotives + nctors + ncontainer_cases + 1 in
+  if List.length args < needed then None
+  else
+    let params, args = CList.chop info.nparams args in
+    let motive, args = (List.hd args, List.tl args) in
+    let motive_array, args = (List.hd args, List.tl args) in
+    let motive_list, args = (List.hd args, List.tl args) in
+    let motive_prod, args =
+      match info.shape with
+      | ArraySelf -> (None, args)
+      | ArrayProdSecond -> (Some (List.hd args), List.tl args)
+    in
+    let branches, args = CList.chop nctors args in
+    let array_case, args = (List.hd args, List.tl args) in
+    let nil_case, args = (List.hd args, List.tl args) in
+    let cons_case, args = (List.hd args, List.tl args) in
+    let prod_case, args =
+      match info.shape with
+      | ArraySelf -> (None, args)
+      | ArrayProdSecond -> (Some (List.hd args), List.tl args)
+    in
+    let target, extra = (List.hd args, List.tl args) in
+    let rec_ty =
+      EConstr.Unsafe.to_constr
+        (Retyping.get_type_of env evd (EConstr.of_constr recursor))
+    in
+    let rec_ty =
+      List.fold_left (prod_after_apply env evd) rec_ty params
+    in
+    let rec_ty = prod_after_apply env evd rec_ty motive in
+    let rec_ty, branches =
+      CList.fold_left_map
+        (fun rec_ty branch ->
+          let branch_ty = prod_domain env evd rec_ty in
+          let branch =
+            adapt_nested_array_branch env evd ~motive_list ~array_case
+              ~nil_case ~cons_case ~prod_case branch_ty branch
+          in
+          (prod_after_apply env evd rec_ty branch, branch))
+        rec_ty branches
+    in
+    let _ = rec_ty in
+    let main_rec = constr_app recursor (params @ (motive :: branches)) in
+    let adapted =
+      match info.focus with
+      | FocusMain -> constr_app main_rec (target :: extra)
+      | FocusArray | FocusList ->
+        let list =
+          match info.focus with
+          | FocusList -> target
+          | FocusArray ->
+            let target_ty =
+              whd_constr env evd
+                (EConstr.Unsafe.to_constr
+                   (Retyping.get_type_of env evd (EConstr.of_constr target)))
+            in
+            let target_head, _ = Constr.decompose_app target_ty in
+            let array_ind, array_inst =
+              match Constr.kind target_head with
+              | Ind (ind, inst) -> (ind, inst)
+              | _ ->
+                CErrors.user_err Pp.(str "Nested recursor target is not an Array")
+            in
+            let mib = Global.lookup_mind (fst array_ind) in
+            let projection, relevance =
+              Declareops.inductive_make_projection array_ind mib ~proj_arg:0
+            in
+            Constr.mkProj
+              ( Projection.make projection false,
+                relevance,
+                target )
+          | FocusMain | FocusProd -> assert false
+        in
+        let element_motive, element_rec =
+          match info.shape with
+          | ArraySelf -> (motive, main_rec)
+          | ArrayProdSecond ->
+            let list_ty =
+              whd_constr env evd
+                (EConstr.Unsafe.to_constr
+                   (Retyping.get_type_of env evd (EConstr.of_constr list)))
+            in
+            let _, list_args = Constr.decompose_app list_ty in
+            let element_ty = list_args.(0) in
+            let make_body f =
+              let _, snd = prod_parts
+                  (Environ.push_rel
+                    (RelDecl.LocalAssum (Context.anonR, element_ty)) env)
+                  evd (Constr.mkRel 1)
+              in
+              Constr.mkLambda
+                (Context.anonR, element_ty, constr_app (Vars.lift 1 f) [ snd ])
+            in
+            (make_body motive, make_body main_rec)
+        in
+        let all_ind, all_inst, all_args, all_term =
+          nested_list_all_forall env evd recursor element_motive element_rec
+            list
+        in
+        let list, folded =
+          nested_list_fold env evd ~depth:0 ~motive_list ~nil_case
+            ~cons_case ~prod_case ~all_term ~all_inst ~all_ind ~all_args
+        in
+        let result =
+          match info.focus with
+          | FocusArray -> constr_app array_case [ list; folded ]
+          | FocusList -> folded
+          | FocusMain | FocusProd -> assert false
+        in
+        let _ = motive_array in
+        constr_app result extra
+      | FocusProd ->
+        let prod_case = Option.get prod_case in
+        let fst, snd = prod_parts env evd target in
+        let result = constr_app prod_case [ fst; snd; constr_app main_rec [ snd ] ] in
+        let _ = motive_prod in
+        constr_app result extra
+    in
+    Some adapted
+
 let rec to_constr =
   let open Constr in
   let ( >>= ) x f uconv =
@@ -1215,9 +1863,39 @@ let rec to_constr =
     | Sort univ ->
       to_univ_level' univ >>= fun u -> ret (mkSort (sort_of_level u))
     | Const (n, univs) -> instantiate n univs
-    | App (a, b) ->
-      to_constr env a >>= fun a ->
-      to_constr env b >>= fun b -> ret (mkApp (a, [| b |]))
+    | (App _ as app_expr) -> (
+      let head, args = decompose_lean_app [] app_expr in
+      match head with
+      | Const (n, univs) when N.Map.mem n !nested_array_rec_info ->
+        let info = N.Map.get n !nested_array_rec_info in
+        instantiate info.base_rec univs >>= fun recursor ->
+        (fun uconv ->
+          let uconv, args =
+            CList.fold_left_map
+              (fun uconv arg -> to_constr env arg uconv)
+              uconv args
+          in
+          let adapted =
+            with_env_evm env uconv
+              (fun env evd () ->
+                adapt_nested_array_recursor env evd info recursor args)
+              ()
+          in
+          match adapted with
+          | Some term -> uconv, term
+          | None ->
+            let term =
+              List.fold_left
+                (fun f x -> Constr.mkApp (f, [| x |]))
+                recursor args
+            in
+            uconv, term)
+      | _ ->
+        let a, b =
+          match app_expr with App (a, b) -> a, b | _ -> assert false
+        in
+        to_constr env a >>= fun a ->
+        to_constr env b >>= fun b -> ret (mkApp (a, [| b |])))
     | Let { name; ty; v; rest } ->
       to_constr env ty >>= fun ty ->
       to_annot env name ty >>= fun name ->
@@ -1551,7 +2229,12 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
       in
       let cnames, ctys = List.split ctors in
       let graph = uconv.graph in
-      let univs, algs = univ_entry_gen uconv univs in
+      let drop_global_lower_bounds =
+        N.equal n list_name || N.equal n array_name
+      in
+      let univs, algs =
+        univ_entry_gen ~drop_global_lower_bounds uconv univs
+      in
       let ind_name = name_for n i in
       let record, fields, ctys =
         match (indices, ctys) with
@@ -1645,7 +2328,13 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
       in
       let mind =
         let act finite =
-          DeclareInd.declare_mutual_inductive_with_eliminations (entry finite)
+          let all_depth = if N.equal n list_name then Some 1 else None in
+          let schemes =
+            if N.equal n list_name then DeclareInd.Default
+            else DeclareInd.None
+          in
+          DeclareInd.declare_mutual_inductive_with_eliminations ?all_depth
+            ~schemes (entry finite)
             (* the ubinders API is kind of shit here *)
             (UState.Polymorphic_entry UContext.empty, UnivNames.empty_binders)
             []
@@ -1657,8 +2346,62 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
       assert (
         squashy.lean_squashes
         || (Global.lookup_mind mind).mind_packets.(0).mind_squashed == None);
-      (* Declare projections if the inductive is a record *)
       let () =
+        if N.equal n array_name then array_minds := mind :: !array_minds
+        else if N.equal n prod_name then prod_minds := mind :: !prod_minds
+        else
+          match !array_minds with
+          | [] -> ()
+          | _ :: _ ->
+            let nested_shape =
+              List.find_map
+                (fun cty ->
+                  let binders, _ = Term.decompose_prod cty in
+                  List.find_map
+                    (fun (_, binder_ty) ->
+                      let head, args = Constr.decompose_app binder_ty in
+                      match Constr.kind head with
+                      | Ind ((mind, _), _)
+                        when
+                          List.exists
+                            (MutInd.UserOrd.equal mind) !array_minds ->
+                        let element = args.(Array.length args - 1) in
+                        let element_head, _ = Constr.decompose_app element in
+                        let shape =
+                          match Constr.kind element_head with
+                          | Ind ((mind, _), _)
+                            when
+                              List.exists
+                                (MutInd.UserOrd.equal mind) !prod_minds ->
+                            ArrayProdSecond
+                          | _ -> ArraySelf
+                        in
+                        Some shape
+                      | _ -> None)
+                    binders)
+                ctys
+            in
+            Option.iter
+              (fun shape ->
+                let base_rec = N.append n "rec" in
+                let nparams = List.length params in
+                let nctors = List.length ctys in
+                let add name focus =
+                  nested_array_rec_info :=
+                    N.Map.add name
+                      { base_rec; nparams; nctors; focus; shape }
+                      !nested_array_rec_info
+                in
+                add base_rec FocusMain;
+                add (N.append n "rec_1") FocusArray;
+                add (N.append n "rec_2") FocusList;
+                match shape with
+                | ArraySelf -> ()
+                | ArrayProdSecond -> add (N.append n "rec_3") FocusProd)
+              nested_shape
+      in
+      (* Declare projections if the inductive is a record *)
+      let projections =
         match record with
         | Some (Some _) ->
           let inhabitant_id = ind_name in
@@ -1674,10 +2417,15 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
               fields
           in
           let implfs = List.map (fun _ -> []) fields in
-          ignore
-            (Record.Internal.declare_projections (mind, 0) ~kind ~inhabitant_id
-               proj_flags implfs)
-        | _ -> ()
+          Record.Internal.declare_projections (mind, 0) ~kind ~inhabitant_id
+            proj_flags implfs
+        | _ -> []
+      in
+      let () =
+        if N.equal n array_name then
+          declare_array_all_scheme mind ind_name univs fields projections
+        else if N.equal n prod_name then
+          declare_prod_second_all_scheme mind ind_name univs projections
       in
       (mind, algs, ind_name, cnames, univs, squashy)
   in
