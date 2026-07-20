@@ -1459,6 +1459,107 @@ let declare_prod_second_all_scheme mind ind_name source_uctx projections =
       (GlobRef.IndRef (mind, 0), all_forall_c)
   | _ -> ()
 
+let last_projection_returns_only_parameter mind source_uctx projections =
+  match
+    ((Global.lookup_mind mind).mind_params_ctxt, List.rev projections)
+  with
+  | ( [ RelDecl.LocalAssum _ ],
+      { Structures.Structure.proj_body = Some field_c; _ } :: _ ) ->
+    let env = Environ.push_context source_uctx (Global.env ()) in
+    let evd = Evd.from_env env in
+    let field_ref = Constr.mkConstU (field_c, UContext.instance source_uctx) in
+    let field_ty =
+      EConstr.Unsafe.to_constr
+        (Retyping.get_type_of env evd (EConstr.of_constr field_ref))
+    in
+    let whd env term =
+      EConstr.Unsafe.to_constr
+        (Reductionops.whd_all env evd (EConstr.of_constr term))
+    in
+    (match Constr.kind (whd env field_ty) with
+    | Constr.Prod (param_annot, param_ty, body) ->
+      let env =
+        Environ.push_rel (RelDecl.LocalAssum (param_annot, param_ty)) env
+      in
+      (match Constr.kind (whd env body) with
+      | Constr.Prod (value_annot, value_ty, result_ty) ->
+        let env =
+          Environ.push_rel
+            (RelDecl.LocalAssum (value_annot, value_ty))
+            env
+        in
+        Reductionops.is_conv env evd
+          (EConstr.of_constr result_ty)
+          (EConstr.of_constr (Constr.mkRel 2))
+      | _ -> false)
+    | _ -> false)
+  | _ -> false
+
+let declare_last_field_all_scheme mind ind_name source_uctx projections =
+  match List.rev projections with
+  | { Structures.Structure.proj_body = Some field_c; _ } :: _ -> (
+    match (Global.lookup_mind mind).mind_params_ctxt with
+    | [ RelDecl.LocalAssum (a_na, a_ty) ] ->
+      let all_uctx, source_inst, q, motive_level =
+        extended_all_uctx source_uctx
+      in
+      let motive_univ = Universe.make motive_level in
+      let motive_sort = qsort q motive_univ in
+      let ind_ref = Constr.mkIndU ((mind, 0), source_inst) in
+      let field_ref = Constr.mkConstU (field_c, source_inst) in
+      let motive_ty =
+        Constr.mkProd
+          (Context.nameR (Id.of_string "x"), reln 1, motive_sort)
+      in
+      let ind_a rel_a = app ind_ref [ reln rel_a ] in
+      let field_ap rel_a rel_p = app field_ref [ reln rel_a; reln rel_p ] in
+      let all_body =
+        Constr.mkLambda
+          ( a_na,
+            a_ty,
+            Constr.mkLambda
+              ( Context.nameR (Id.of_string "P"),
+                motive_ty,
+                Constr.mkLambda
+                  ( Context.nameR (Id.of_string "value"),
+                    ind_a 2,
+                    app (reln 2) [ field_ap 3 1 ] ) ) )
+      in
+      let univs =
+        (UState.Polymorphic_entry all_uctx, UnivNames.empty_binders)
+      in
+      let all_c =
+        quickdef ~name:(all_name ind_name) ~types:None ~univs all_body
+      in
+      DeclareScheme.declare_scheme Libobject.SuperGlobal "All"
+        (GlobRef.IndRef (mind, 0), all_c);
+      let all_forall_body =
+        Constr.mkLambda
+          ( a_na,
+            a_ty,
+            Constr.mkLambda
+              ( Context.nameR (Id.of_string "P"),
+                motive_ty,
+                Constr.mkLambda
+                  ( qname q motive_univ "h",
+                    Constr.mkProd
+                      ( Context.nameR (Id.of_string "x"),
+                        reln 2,
+                        app (reln 2) [ reln 1 ] ),
+                    Constr.mkLambda
+                      ( Context.nameR (Id.of_string "value"),
+                        ind_a 3,
+                        app (reln 2) [ field_ap 4 1 ] ) ) ) )
+      in
+      let all_forall_c =
+        quickdef ~name:(all_forall_name ind_name) ~types:None ~univs
+          all_forall_body
+      in
+      DeclareScheme.declare_scheme Libobject.SuperGlobal "AllForall"
+        (GlobRef.IndRef (mind, 0), all_forall_c)
+    | _ -> ())
+  | _ -> ()
+
 let rec decompose_lean_app acc = function
   | App (f, x) -> decompose_lean_app (x :: acc) f
   | head -> (head, acc)
@@ -1921,7 +2022,8 @@ let all_rect env evd all_ind all_inst motive_at_target =
   in
   EConstr.Unsafe.to_constr rect
 
-let rec fold_mutual_nested env evd ~depth mind specs target proof =
+let rec fold_mutual_nested env evd ~depth ~folded_leaves mind specs target
+    proof =
   let open Constr in
   let target_ty =
     whd_constr env evd
@@ -1963,48 +2065,47 @@ let rec fold_mutual_nested env evd ~depth mind specs target proof =
         mkProj (Projection.make projection false, relevance, target)
       in
       let folded =
-        fold_mutual_nested env evd ~depth mind specs list proof
+        fold_mutual_nested env evd ~depth ~folded_leaves mind specs list
+          proof
       in
       (match cases with
       | [ array_case ] -> constr_app array_case [ list; folded ]
       | _ -> CErrors.user_err Pp.(str "Nested Array has unexpected cases"))
     else if mind_is_one_of target_mind !prod_minds then
       let fst, snd = prod_parts env evd target in
-      let folded = fold_mutual_nested env evd ~depth mind specs snd proof in
+      let folded =
+        fold_mutual_nested env evd ~depth ~folded_leaves mind specs snd proof
+      in
       (match cases with
       | [ prod_case ] -> constr_app prod_case [ fst; snd; folded ]
       | _ -> CErrors.user_err Pp.(str "Nested Prod has unexpected cases"))
     else if mind_is_one_of target_mind !list_minds then
-      fold_mutual_list env evd ~depth mind specs motive cases target proof
+      fold_mutual_list env evd ~depth ~folded_leaves mind specs motive cases
+        target proof
     else if mind_is_one_of target_mind !option_minds then
-      fold_mutual_option env evd ~depth mind specs motive cases target proof
+      fold_mutual_option env evd ~depth ~folded_leaves mind specs motive cases
+        target proof
     else
       let target_mib = Global.lookup_mind target_mind in
       let packet = target_mib.mind_packets.(target_index) in
       (match (packet.mind_record, cases) with
+      | Declarations.PrimRecord _, [ _ ] when folded_leaves -> proof
       | Declarations.PrimRecord _, [ record_case ] ->
-        let proof_ty =
-          whd_constr env evd
-            (EConstr.Unsafe.to_constr
-               (Retyping.get_type_of env evd (EConstr.of_constr proof)))
+        let nfields = packet.mind_consnrealargs.(0) in
+        let fields =
+          List.init nfields (fun proj_arg ->
+            let projection, relevance =
+              Declareops.inductive_make_projection target_ind target_mib
+                ~proj_arg
+            in
+            mkProj (Projection.make projection false, relevance, target))
         in
-        if convertible env evd proof_ty (constr_app motive [ target ]) then
-          proof
-        else
-          let nfields = packet.mind_consnrealargs.(0) in
-          let fields =
-            List.init nfields (fun proj_arg ->
-              let projection, relevance =
-                Declareops.inductive_make_projection target_ind target_mib
-                  ~proj_arg
-              in
-              mkProj (Projection.make projection false, relevance, target))
-          in
-          constr_app record_case (fields @ [ proof ])
+        constr_app record_case (fields @ [ proof ])
       | _ -> CErrors.user_err Pp.(str "Unsupported nested mutual container"))
   | None -> CErrors.user_err Pp.(str "Nested recursive argument is not inductive")
 
-and fold_mutual_option env evd ~depth mind specs motive cases target proof =
+and fold_mutual_option env evd ~depth ~folded_leaves mind specs motive cases
+    target proof =
   let open Constr in
   let proof_ty =
     whd_constr env evd
@@ -2057,8 +2158,8 @@ and fold_mutual_option env evd ~depth mind specs motive cases target proof =
         env_head
     in
     let head_ih =
-      fold_mutual_nested env_p_head evd ~depth:(depth + 2) mind specs
-        (mkRel 2) (mkRel 1)
+      fold_mutual_nested env_p_head evd ~depth:(depth + 2) ~folded_leaves
+        mind specs (mkRel 2) (mkRel 1)
     in
     let some_branch =
       mkLambda
@@ -2073,7 +2174,8 @@ and fold_mutual_option env evd ~depth mind specs motive cases target proof =
       [ a; p; all_motive; none_case; some_branch; target; proof ]
   | _ -> CErrors.user_err Pp.(str "Nested Option has unexpected cases")
 
-and fold_mutual_list env evd ~depth mind specs motive cases target proof =
+and fold_mutual_list env evd ~depth ~folded_leaves mind specs motive cases
+    target proof =
   let open Constr in
   let proof_ty =
     whd_constr env evd
@@ -2143,8 +2245,8 @@ and fold_mutual_list env evd ~depth mind specs motive cases target proof =
     let ih_ty = constr_app (Vars.lift 4 motive) [ mkRel 2 ] in
     let ih_annot = anon_annot_for_type env_all_tail evd ih_ty in
     let head_ih =
-      fold_mutual_nested env_all_tail evd ~depth:(depth + 4) mind specs
-        (mkRel 4) (mkRel 3)
+      fold_mutual_nested env_all_tail evd ~depth:(depth + 4) ~folded_leaves
+        mind specs (mkRel 4) (mkRel 3)
     in
     let body =
       constr_app (Vars.lift 5 cons_case)
@@ -2435,7 +2537,8 @@ let fold_mutual_auxiliary env evd info specs recursors main_motives main_recs
     let all_term =
       container_all_forall env evd (List.hd recursors) predicate proof target
     in
-    fold_mutual_nested env evd ~depth:0 info.mind specs target all_term
+    fold_mutual_nested env evd ~depth:0 ~folded_leaves:true info.mind specs
+      target all_term
   | Some ((target_mind, _), _, target_args)
     when mind_is_one_of target_mind !list_minds ->
     let predicate, proof =
@@ -2445,7 +2548,8 @@ let fold_mutual_auxiliary env evd info specs recursors main_motives main_recs
     let all_term =
       container_all_forall env evd (List.hd recursors) predicate proof target
     in
-    fold_mutual_nested env evd ~depth:0 info.mind specs target all_term
+    fold_mutual_nested env evd ~depth:0 ~folded_leaves:true info.mind specs
+      target all_term
   | Some ((target_mind, _), _, target_args)
     when mind_is_one_of target_mind !option_minds ->
     let predicate, proof =
@@ -2455,14 +2559,16 @@ let fold_mutual_auxiliary env evd info specs recursors main_motives main_recs
     let all_term =
       container_all_forall env evd (List.hd recursors) predicate proof target
     in
-    fold_mutual_nested env evd ~depth:0 info.mind specs target all_term
+    fold_mutual_nested env evd ~depth:0 ~folded_leaves:true info.mind specs
+      target all_term
   | Some ((target_mind, _), _, _)
     when mind_is_one_of target_mind !prod_minds ->
     let _, proof =
       mutual_nested_leaf env evd ~depth:0 info.mind specs main_motives
         main_recs target
     in
-    fold_mutual_nested env evd ~depth:0 info.mind specs target proof
+    fold_mutual_nested env evd ~depth:0 ~folded_leaves:true info.mind specs
+      target proof
   | Some ((target_mind, target_index), _, _) ->
     let packet = (Global.lookup_mind target_mind).mind_packets.(target_index) in
     (match packet.mind_record with
@@ -2529,8 +2635,8 @@ let adapt_mutual_branch env evd mind specs info branch_ty branch =
             | Some ((target_mind, _), _, _)
               when MutInd.UserOrd.equal target_mind mind -> mkRel 1
             | _ ->
-              fold_mutual_nested env' evd ~depth:(depth + 1) mind specs target
-                (mkRel 1)
+              fold_mutual_nested env' evd ~depth:(depth + 1)
+                ~folded_leaves:false mind specs target (mkRel 1)
           in
           let mapped = mapped @ [ mapped_hyp ] in
           mkLambda
@@ -3284,6 +3390,9 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
           declare_array_all_scheme mind ind_name univs fields projections
         else if N.equal n prod_name then
           declare_prod_second_all_scheme mind ind_name univs projections
+        else if
+          last_projection_returns_only_parameter mind univs projections
+        then declare_last_field_all_scheme mind ind_name univs projections
       in
       (mind, algs, ind_name, cnames, univs, squashy)
   in
