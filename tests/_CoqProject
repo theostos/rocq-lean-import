@@ -22,3 +22,4 @@ uint32_modern.v
 string_of_list.v
 char_of_nat.v
 large_nat_conversion.v
+primitive_record_eliminator.v
