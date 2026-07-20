@@ -1173,7 +1173,7 @@ let mk_list list uinst ty l =
   in
   mk_list_rec l
 
-let mk_string char string list char_uinst mkChar s =
+let mk_string char list char_uinst mkChar string_of_chars s =
   let codepoints =
     try check_valid_codepoints (string_to_codepoints s)
     with Failure msg as exn ->
@@ -1182,7 +1182,7 @@ let mk_string char string list char_uinst mkChar s =
   in
   let chars = List.map (mk_char mkChar) codepoints in
   let ls = mk_list list char_uinst char chars in
-  Constr.(mkApp (mkConstructU ((string, 1), UVars.Instance.empty), [| ls |]))
+  Constr.mkApp (string_of_chars, [| ls |])
 
 (* [c] has type [indu] applied to [args] *)
 let unfold_proj_case env evd ~field ~indu ~mib ~mip ~args c =
@@ -2594,16 +2594,21 @@ let rec to_constr =
     | String s ->
       (* instantiate (N.append N.anon "Char") [] >>= fun char -> *)
       (* let (_, charu) = Constr.destInd char in *)
-      instantiate (N.append N.anon "String") [] >>= fun string ->
-      let string, _ = Constr.destInd string in
-      instantiate (N.append (N.append N.anon "String") "mk") []
-      >>= fun string_mk ->
+      instantiate (N.append N.anon "String") [] >>= fun _string ->
+      let string_mk = N.append (N.append N.anon "String") "mk" in
+      let string_of_list = N.append (N.append N.anon "String") "ofList" in
+      let string_of_chars =
+        if N.Map.mem string_mk !entries || not (N.Map.mem string_of_list !entries)
+        then string_mk
+        else string_of_list
+      in
+      instantiate string_of_chars [] >>= fun string_of_chars ->
       get_uconv >>= fun uconv ->
       let list, char =
         with_env_evm env uconv
           (fun env evd () ->
             let ty =
-              Retyping.get_type_of env evd (EConstr.of_constr string_mk)
+              Retyping.get_type_of env evd (EConstr.of_constr string_of_chars)
             in
             let _, list_char, _ = EConstr.destProd evd ty in
             let list, char =
@@ -2635,7 +2640,7 @@ let rec to_constr =
             EConstr.to_constr evd mkChar)
           ()
       in
-      ret (mk_string char string list UVars.Instance.empty mkChar s)
+      ret (mk_string char list UVars.Instance.empty mkChar string_of_chars s)
 
 and instantiate n univs uconv =
   assert (List.length univs < Sys.int_size);
