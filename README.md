@@ -359,6 +359,29 @@ suffix corresponds to the instantiation of the inductive we eliminate.
 For instance `psum_inst3_indl` is instance 5 (all universes `Prop`) of
 `psum.rec`, its principal argument is of type `psum_inst3`.
 
+## Primitive-record elimination
+
+Rocq's ordinary generated eliminator for a record is a `match`.  If its
+scrutinee is neutral, reducing a projection of the eliminator's result may try
+to unfold the scrutinee until a constructor appears.  That differs badly from
+Lean when the scrutinee contains a large closed computation hidden behind a
+pair or structure wrapper.
+
+Imported primitive records instead receive a projection-based eliminator: its
+single branch is applied directly to the primitive projections of the neutral
+record.  Rocq's judgmental eta rule for primitive records proves that this has
+the original generated eliminator's type, and the importer checks that
+conversion before declaring the replacement.  Non-forcing wrappers whose head
+is such an eliminator are marked `Expand`, so Rocq exposes the projections
+before considering the scrutinee.
+
+Lean also exports named structure fields as ordinary definitions.  After
+checking that such a definition really is the expected field projection, the
+importer translates saturated uses directly to Rocq primitive-projection
+nodes.  Partial applications retain the checked projection constant.  This
+keeps both sides of later conversions syntactically aligned without any
+library- or theorem-specific rewrite.
+
 ## Closed natural-number conversion certificates
 
 Large Lean natural numbers are compact kernel values.  Expanding the same

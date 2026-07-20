@@ -81,6 +81,54 @@ let reorder_outside info ft =
   let hyps, out = Term.decompose_prod ft in
   fst (reorder_outside (List.rev info) (List.rev hyps) out)
 
+(** Rocq normally generates a [match] for a record eliminator.  When the
+    scrutinee is neutral, reducing projections of the result can then force the
+    scrutinee merely to expose its constructor.  This is especially harmful
+    when the neutral term contains a large closed computation.
+
+    Primitive records have judgmental eta in Rocq.  Their one-branch
+    eliminator can therefore apply the branch to the primitive projections of
+    the scrutinee instead.  We check that the replacement has the original
+    generated scheme's type, so this optimization relies only on Rocq's kernel
+    eta rule and is independent of any particular Lean declaration. *)
+let project_primitive_record_scheme env (mind, ind_index) body =
+  let mib = Global.lookup_mind mind in
+  let packet = mib.mind_packets.(ind_index) in
+  match packet.mind_record with
+  | Declarations.PrimRecord _ ->
+    let nb_lambdas = mib.mind_nparams + 3 in
+    let binders, inside = Term.decompose_lambda_n_assum nb_lambdas body in
+    (match Constr.kind inside with
+    | Constr.Case (_, _, _, _, _, scrutinee, branches)
+      when Constr.equal scrutinee (Constr.mkRel 1)
+           && Array.length branches = 1 ->
+      let target = Constr.mkRel 1 in
+      let fields =
+        List.init packet.mind_consnrealargs.(0) (fun proj_arg ->
+            let projection, relevance =
+              Declareops.inductive_make_projection (mind, ind_index) mib
+                ~proj_arg
+            in
+            Constr.mkProj
+              (Projection.make projection false, relevance, target))
+      in
+      let projected =
+        Term.it_mkLambda_or_LetIn
+          (Constr.mkApp (Constr.mkRel 2, Array.of_list fields))
+          binders
+      in
+      let evd = Evd.from_env env in
+      let type_of term =
+        Retyping.get_type_of env evd (EConstr.of_constr term)
+      in
+      if Reductionops.is_conv env evd (type_of body) (type_of projected) then
+        projected
+      else
+        CErrors.user_err
+          Pp.(str "Projection-based primitive-record scheme changed type")
+    | _ -> body)
+  | _ -> body
+
 (** Whether Rocq's induction-scheme generator will add a recursive hypothesis
     for an argument of type [term]. A mere occurrence of [mind] is not enough:
     for a nested occurrence, Rocq only adds the hypothesis when the enclosing
@@ -255,8 +303,9 @@ let lean_scheme env ~dep (mind, ind_index) u s =
       recinfo
   in
 
-  if not hasrec then body
-  else
+  let body =
+    if not hasrec then body
+    else begin
     (* body := fun params P (fc : forall args/recargs, P (C args)) => ...
 
        becomes
@@ -313,6 +362,9 @@ let lean_scheme env ~dep (mind, ind_index) u s =
       norm_val (create_clos_infos betaiota env) (create_tab ()) (inject body)
     in
     Term.it_mkLambda_or_LetIn (Term.it_mkLambda_or_LetIn body fcs) paramsP
+    end
+  in
+  project_primitive_record_scheme env (mind, ind_index) body
 
 let with_unsafe_univs f () =
   let flags = Global.typing_flags () in
@@ -520,6 +572,18 @@ let to_univ_level u uconv =
     we get a term without definitions (recursors don't count). *)
 
 let height_cache = Summary.ref ~name:"lean-heights" N.Map.empty
+
+(** Lean names whose translated definitions are non-forcing structural
+    eliminators.  Rocq's conversion oracle should expose these before it tries
+    to reduce their neutral arguments. *)
+let expand_head_cache = Summary.ref ~name:"lean-expand-heads" N.Set.empty
+
+let rec expands_at_head = function
+  | Const (constant, _) -> N.Set.mem constant !expand_head_cache
+  | App (function_, _) -> expands_at_head function_
+  | Lam (_, _, _, body) -> expands_at_head body
+  | Let { rest; _ } -> expands_at_head rest
+  | Bound _ | Sort _ | Pi _ | Proj _ | Nat _ | String _ -> false
 
 let rec height = function
   | Const (c, _) ->
@@ -988,6 +1052,39 @@ type translated_mutual_inductive = {
   constructor_names : N.t list;
   constructor_types : Constr.t list;
 }
+
+type projection_alias = {
+  projection_inst : instantiation;
+  projection_record : N.t;
+  projection_ind : Names.inductive;
+  projection_field : int;
+}
+
+let projection_aliases : projection_alias Int.Map.t N.Map.t ref =
+  Summary.ref ~name:"lean-projection-aliases" N.Map.empty
+
+let add_projection_alias name instance alias =
+  projection_aliases :=
+    N.Map.update name
+      (function
+        | None -> Some (Int.Map.singleton instance alias)
+        | Some aliases -> Some (Int.Map.add instance alias aliases))
+      !projection_aliases
+
+let find_projection_alias name instance =
+  Option.bind (N.Map.find_opt name !projection_aliases) (fun aliases ->
+      Int.Map.find_opt instance aliases)
+
+let find_projection_alias_for_universes uconv name universes =
+  let sorts = List.map (to_universe uconv.map) universes in
+  let instance, _ = int_of_univs sorts in
+  find_projection_alias name instance
+
+let rec is_projection_wrapper record field = function
+  | Lam (_, _, _, body) -> is_projection_wrapper record field body
+  | Proj (projected_record, projected_field, Bound 0) ->
+    N.equal record projected_record && Int.equal field projected_field
+  | _ -> false
 
 let add_declared n i inst =
   declared :=
@@ -2824,6 +2921,52 @@ let rec to_constr =
         ret (mkApp (a, [| b |]))
       in
       match head with
+      | Const (n, univs) when N.Map.mem n !projection_aliases ->
+        fun uconv ->
+          let alias = find_projection_alias_for_universes uconv n univs in
+          let uconv, translated_args =
+            CList.fold_left_map
+              (fun uconv arg -> to_constr env arg uconv)
+              uconv args
+          in
+          let apply_arguments function_ arguments =
+            List.fold_left
+              (fun function_ argument ->
+                let argument =
+                  with_env_evm env uconv
+                    (fun env evd () ->
+                      maybe_transport_application env evd function_ argument)
+                    ()
+                in
+                Constr.mkApp (function_, [| argument |]))
+              function_ arguments
+          in
+          (match alias with
+          | Some alias ->
+            let mib = Global.lookup_mind (fst alias.projection_ind) in
+            let nparams = mib.mind_nparams in
+            if List.length translated_args < nparams + 1 then
+              let uconv, function_ = instantiate n univs uconv in
+              uconv, apply_arguments function_ translated_args
+            else
+              let target = List.nth translated_args nparams in
+              let projection, relevance =
+                Declareops.inductive_make_projection alias.projection_ind mib
+                  ~proj_arg:alias.projection_field
+              in
+              let projected =
+                Constr.mkProj
+                  (Projection.make projection false, relevance, target)
+              in
+              let extra =
+                List.filteri
+                  (fun index _ -> index > nparams)
+                  translated_args
+              in
+              uconv, apply_arguments projected extra
+          | None ->
+            let uconv, function_ = instantiate n univs uconv in
+            uconv, apply_arguments function_ translated_args)
       | Const (n, univs) -> (
         match find_mutual_nested_rec_info n with
         | None -> translate_plain ()
@@ -3057,10 +3200,26 @@ and declare_def { name = n; ty; body; univs; } i =
   in
   let () =
     let c = match ref with ConstRef c -> c | _ -> assert false in
-    let height = height n body in
-    Global.set_strategy (Conv_oracle.EvalConstRef c) (Level (-height))
+    if expands_at_head body then begin
+      Global.set_strategy (Conv_oracle.EvalConstRef c) Conv_oracle.Expand;
+      expand_head_cache := N.Set.add n !expand_head_cache
+    end
+    else
+      let height = height n body in
+      Global.set_strategy (Conv_oracle.EvalConstRef c) (Level (-height))
   in
-  let inst = { ref; algs } in
+  let inst =
+    match find_projection_alias n i with
+    | Some alias ->
+      if is_projection_wrapper alias.projection_record alias.projection_field body
+      then alias.projection_inst
+      else
+        CErrors.user_err
+          Pp.(
+            str "Generated field " ++ N.pp n
+            ++ str " is not the expected primitive-record projection")
+    | None -> { ref; algs }
+  in
   let () = add_declared n i inst in
   inst
 
@@ -3137,7 +3296,7 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
   let uint32_is_legacy =
     declared_as (N.append N.anon "UInt32") 0 "lean.UInt32.legacy"
   in
-  let mind, algs, ind_name, cnames, univs, squashy =
+  let mind, algs, ind_name, cnames, univs, squashy, projection_aliases =
     match get_predeclared_ind_some ~ctors ~uint32_is_legacy n i with
     | Some (Eq, _, (ind_name, mind)) ->
       (* Hack to let the user predeclare eq and quot before running Lean Import
@@ -3162,7 +3321,8 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
         ind_name,
         [ cname ],
         univs,
-        squashy )
+        squashy,
+        [] )
     | Some
         ( ( ( Nat
             | Nat_le
@@ -3180,7 +3340,7 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
       Feedback.msg_info Pp.(Id.print ind_name ++ str " is predeclared");
       let cnames = get_predeclared_cnames k n in
       let squashy = N.Map.get n !squash_info in
-      (mind, [], ind_name, cnames, UContext.empty, squashy)
+      (mind, [], ind_name, cnames, UContext.empty, squashy, [])
     | None ->
       let uconv = start_uconv univs i in
       let (env_params, uconv), params = to_params uconv params in
@@ -3219,7 +3379,7 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
         univ_entry_gen ~drop_global_lower_bounds uconv univs
       in
       let ind_name = name_for n i in
-      let record, fields, ctys =
+      let record, fields, ctys, field_names =
         match (indices, ctys) with
         | [], [ cty ] ->
           cty
@@ -3227,6 +3387,15 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
                  let fields, codom =
                    Reductionops.whd_decompose_prod env evm
                      (EConstr.of_constr cty)
+                 in
+                 let field_names =
+                   List.rev_map
+                     (fun (annot, _) ->
+                       match annot.Context.binder_name with
+                       | Names.Anonymous -> None
+                       | Names.Name id ->
+                         Some (N.append n (Names.Id.to_string id)))
+                     fields
                  in
                  let _, fields =
                    CList.fold_left_map
@@ -3263,7 +3432,7 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
                    walk (npars + 1) cty'
                  in
                  match (fields, Sorts.is_sprop sort, is_recursive) with
-                 | [], true, _ -> (None, [], ctys)
+                 | [], true, _ -> (None, [], ctys, [])
                  | _ :: _, false, false ->
                    if
                      List.exists
@@ -3271,9 +3440,13 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
                          na.Context.binder_relevance
                          == EConstr.ERelevance.relevant)
                        fields
-                   then (Some (Some [| default_proj_id |]), fields, [ cty' ])
-                   else (None, [], ctys)
-                 | [], false, _ -> (None, [], ctys)
+                   then
+                     ( Some (Some [| default_proj_id |]),
+                       fields,
+                       [ cty' ],
+                       field_names )
+                   else (None, [], ctys, [])
+                 | [], false, _ -> (None, [], ctys, [])
                  | _ :: _, true, false ->
                    if
                      List.for_all
@@ -3281,10 +3454,14 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
                          na.Context.binder_relevance
                          == EConstr.ERelevance.irrelevant)
                        fields
-                   then (Some (Some [| default_proj_id |]), fields, [ cty' ])
-                   else (None, [], ctys)
-                 | _ :: _, _, true -> (None, [], ctys))
-        | _ -> (None, [], ctys)
+                   then
+                     ( Some (Some [| default_proj_id |]),
+                       fields,
+                       [ cty' ],
+                       field_names )
+                   else (None, [], ctys, [])
+                 | _ :: _, _, true -> (None, [], ctys, []))
+        | _ -> (None, [], ctys, [])
       in
       let entry finite =
         {
@@ -3360,6 +3537,33 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
             proj_flags implfs
         | _ -> []
       in
+      let projection_aliases =
+        let rec collect field projections names aliases =
+          match projections, names with
+          | [], [] -> List.rev aliases
+          | projection :: projections, name :: names ->
+            let aliases =
+              match name, projection with
+              | Some name,
+                { Structures.Structure.proj_body = Some constant; _ } ->
+                ( name,
+                  {
+                    projection_inst =
+                      { ref = GlobRef.ConstRef constant; algs };
+                    projection_record = n;
+                    projection_ind = (mind, 0);
+                    projection_field = field;
+                  } )
+                :: aliases
+              | _ -> aliases
+            in
+            collect (field + 1) projections names aliases
+          | _ ->
+            CErrors.user_err
+              Pp.(str "Primitive-record fields and projections differ")
+        in
+        collect 0 projections field_names []
+      in
       let () =
         if N.equal n array_name then
           declare_array_all_scheme mind ind_name univs fields projections
@@ -3369,7 +3573,7 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
           last_projection_returns_only_parameter mind univs projections
         then declare_last_field_all_scheme mind ind_name univs projections
       in
-      (mind, algs, ind_name, cnames, univs, squashy)
+      (mind, algs, ind_name, cnames, univs, squashy, projection_aliases)
   in
 
   (* add ind and ctors to [declared] *)
@@ -3381,6 +3585,13 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
         add_declared cname i
           { ref = GlobRef.ConstructRef ((mind, 0), cnum + 1); algs })
       cnames
+  in
+  let () =
+    List.iter
+      (fun (name, alias) ->
+        add_declared name i alias.projection_inst;
+        add_projection_alias name i alias)
+      projection_aliases
   in
 
   declare_lean_schemes ~mind ~ind_index:0 ~n ~ind_name ~i ~univs ~algs
@@ -3646,8 +3857,15 @@ and declare_lean_schemes ~mind ~ind_index ~n ~ind_name ~i ~univs ~algs
       else if sort = SchemeType then 2 * i
       else (2 * i) + 1
     in
-    add_declared (N.append n "rec") scheme_index
-      { ref = elim; algs = scheme_algs }
+    let recursor = N.append n "rec" in
+    (match (Global.lookup_mind mind).mind_packets.(ind_index).mind_record, elim
+     with
+    | Declarations.PrimRecord _, GlobRef.ConstRef constant ->
+      Global.set_strategy (Conv_oracle.EvalConstRef constant)
+        Conv_oracle.Expand;
+      expand_head_cache := N.Set.add recursor !expand_head_cache
+    | _ -> ());
+    add_declared recursor scheme_index { ref = elim; algs = scheme_algs }
   in
   let elims =
     if squashy.lean_squashes then [ "_indl", SchemeSProp ]
