@@ -359,6 +359,29 @@ suffix corresponds to the instantiation of the inductive we eliminate.
 For instance `psum_inst3_indl` is instance 5 (all universes `Prop`) of
 `psum.rec`, its principal argument is of type `psum_inst3`.
 
+## Closed natural-number conversion certificates
+
+Large Lean natural numbers are compact kernel values.  Expanding the same
+values through Rocq's inductive `Nat` during conversion can take gigabytes;
+for example, checking that `18446744073709551616` is `2 ^ 64` used to exhaust
+memory.
+
+The importer therefore represents large literals as `Nat_of_N` applied to a
+binary `N`.  When conversion finds two closed `Nat` expressions built from
+zero, successor, `Nat_of_N`, addition, multiplication, or exponentiation, it
+evaluates them with Zarith while constructing a `NatCertificate` proof for
+every evaluation step.  If both sides produce the same binary value, a Rocq
+lemma derives their Lean equality and transports the surrounding `SProp`
+proof to the expected type.
+
+The OCaml evaluation is only a performance hint: its result is accepted only
+when the generated certificate type-checks in the Rocq kernel.  This adds no
+axiom, reduction rule, or theorem-specific replacement proof.  Unsupported,
+open, or excessively large expressions are left to ordinary Rocq conversion.
+The current transport layer handles closed arithmetic differences inside
+`SProp`; symbolic computations blocked on variables remain a separate
+conversion problem.
+
 # Experimental results
 
 All times are on my laptop, which may have caused variance through
