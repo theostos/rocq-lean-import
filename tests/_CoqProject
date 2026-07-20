@@ -23,5 +23,6 @@ string_of_list.v
 lowercase_hex.v
 large_nat_conversion.v
 char_of_nat.v
+proof_producing_nat_sub.v
 primitive_record_eliminator.v
 record_valued_definition_eta.v

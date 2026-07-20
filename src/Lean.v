@@ -255,9 +255,23 @@ Fixpoint Nat_pow n m :=
     | Nat_succ m => Nat_mul (Nat_pow n m) n
   end.
 
+Definition Nat_pred n :=
+  match n with
+  | Nat_zero => Nat_zero
+  | Nat_succ n => n
+  end.
+
+Fixpoint Nat_sub n m :=
+  match m with
+  | Nat_zero => n
+  | Nat_succ m => Nat_pred (Nat_sub n m)
+  end.
+
 Register Nat_add as lean.Nat_add.
 Register Nat_mul as lean.Nat_mul.
 Register Nat_pow as lean.Nat_pow.
+Register Nat_pred as lean.Nat_pred.
+Register Nat_sub as lean.Nat_sub.
 Register Nat_of_N as lean.Nat_of_N.
 
 Import NArith.
@@ -306,6 +320,21 @@ Proof.
     apply PeanoNat.Nat.le_0_l.
 Qed.
 
+Lemma nat_of_Nat_pred_logic (a : Nat) :
+  Logic.eq (nat_of_Nat (Nat_pred a)) (PeanoNat.Nat.pred (nat_of_Nat a)).
+Proof. destruct a; reflexivity. Qed.
+
+Lemma nat_of_Nat_sub_logic (a b : Nat) :
+  Logic.eq (nat_of_Nat (Nat_sub a b))
+    (nat_of_Nat a - nat_of_Nat b)%nat.
+Proof.
+  induction b as [|b IH].
+  - now rewrite PeanoNat.Nat.sub_0_r.
+  - cbn [Nat_sub nat_of_Nat].
+    rewrite nat_of_Nat_pred_logic, IH.
+    symmetry; apply PeanoNat.Nat.sub_succ_r.
+Qed.
+
 Lemma N_of_Nat_add_logic (a b : Nat) :
   Logic.eq (N_of_Nat (Nat_add a b))
     (N_of_Nat a + N_of_Nat b)%N.
@@ -330,6 +359,15 @@ Lemma N_of_Nat_pow_logic (a b : Nat) :
 Proof.
   unfold N_of_Nat.
   rewrite nat_of_Nat_pow_logic, Nat2N.inj_pow.
+  reflexivity.
+Qed.
+
+Lemma N_of_Nat_sub_logic (a b : Nat) :
+  Logic.eq (N_of_Nat (Nat_sub a b))
+    (N_of_Nat a - N_of_Nat b)%N.
+Proof.
+  unfold N_of_Nat.
+  rewrite nat_of_Nat_sub_logic, Nat2N.inj_sub.
   reflexivity.
 Qed.
 
@@ -390,6 +428,16 @@ Proof.
   reflexivity.
 Qed.
 
+Lemma NatCertificate_sub (a b : Nat) (na nb : N) :
+  NatCertificate a na -> NatCertificate b nb ->
+  NatCertificate (Nat_sub a b) (na - nb)%N.
+Proof.
+  unfold NatCertificate.
+  intros Ha Hb.
+  rewrite N_of_Nat_sub_logic, Ha, Hb.
+  reflexivity.
+Qed.
+
 Lemma Nat2natid_logic (n : Nat) :
   Logic.eq (Nat_of_nat (nat_of_Nat n)) n.
 Proof.
@@ -433,6 +481,7 @@ Register NatCertificate_succ as lean.NatCertificate_succ.
 Register NatCertificate_add as lean.NatCertificate_add.
 Register NatCertificate_mul as lean.NatCertificate_mul.
 Register NatCertificate_pow as lean.NatCertificate_pow.
+Register NatCertificate_sub as lean.NatCertificate_sub.
 Register NatCertificate_equal as lean.NatCertificate_equal.
 Register Nat_transport_sprop as lean.Nat_transport_sprop.
 
