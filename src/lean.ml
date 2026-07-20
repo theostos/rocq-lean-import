@@ -806,10 +806,10 @@ let name_for n i =
     let base = if i = 0 then base else Id.of_string (Id.to_string base ^ "_") in
     Namegen.next_global_ident_away (Global.safe_env ()) base Id.Set.empty
 
-let get_predeclared_ind indn n i =
+let get_predeclared_ind_suffixed indn suffix n i =
   if N.equal n (N.append_list N.anon indn) then
     let ind_name = name_for_core n i in
-    let reg = "lean." ^ Id.to_string ind_name in
+    let reg = "lean." ^ Id.to_string ind_name ^ suffix in
     match Rocqlib.lib_ref reg with
     | IndRef (ind, 0) -> Some (ind_name, ind)
     | _ ->
@@ -820,6 +820,18 @@ let get_predeclared_ind indn n i =
           ++ str " expected an inductive.")
     | exception _ -> None
   else None
+
+let ctor_first_field_head ctors =
+  let open LeanExpr in
+  match ctors with
+  | [ (_, Pi (_, _, field_ty, _)) ] ->
+    let rec head = function
+      | App (f, _) -> head f
+      | Const (n, _) -> Some n
+      | _ -> None
+    in
+    head field_ty
+  | _ -> None
 
 (** Like [get_predeclared_ind] but looks for an inductive predeclared as a
     definition (using a ".cumul" suffix on the registration). Returns the
@@ -852,7 +864,18 @@ let get_predeclared_def defn n i =
     | exception _ -> None
   else None
 
-type predeclared_ind_kind = Eq | Nat | Nat_le | Or | And | Fin | UInt32 | BitVec | Char
+type core_shape = Legacy | Modern
+
+type predeclared_ind_kind =
+  | Eq
+  | Nat
+  | Nat_le
+  | Or
+  | And
+  | Fin
+  | UInt32 of core_shape
+  | BitVec
+  | Char of core_shape
 type predeclared_def_kind = UInt32_size | Add | Mult | Pow | Nat_isValidChar
 type predeclared_ind_as_def_kind = ULift_cumul
 
@@ -864,14 +887,26 @@ let get_predeclared_cnames (k : predeclared_ind_kind) n =
   | Or -> [ N.append n "inl"; N.append n "inr" ]
   | And -> [ N.append n "intro" ]
   | Fin -> [ N.append n "mk" ]
-  | UInt32 -> [ N.append n "ofBitVec" ]
+  | UInt32 Legacy -> [ N.append n "mk" ]
+  | UInt32 Modern -> [ N.append n "ofBitVec" ]
   | BitVec -> [ N.append n "ofFin" ]
-  | Char -> [ N.append n "mk" ]
+  | Char _ -> [ N.append n "mk" ]
 
-let get_predeclared_ind_any n i =
+let get_predeclared_ind_any ~ctors ~uint32_is_legacy n i =
+  let uint32_shape =
+    match ctor_first_field_head ctors with
+    | Some head when N.equal head (N.append_list N.anon [ "Fin" ]) -> Legacy
+    | _ -> Modern
+  in
+  let char_shape = if uint32_is_legacy then Legacy else Modern in
+  let suffix = function
+    | UInt32 Legacy | Char Legacy -> ".legacy"
+    | _ -> ""
+  in
   List.filter_map
     (fun (indk, indh) ->
-      get_predeclared_ind indh n i |> Option.map (fun x -> (indk, indh, x)))
+      get_predeclared_ind_suffixed indh (suffix indk) n i
+      |> Option.map (fun x -> (indk, indh, x)))
     [
       (Eq, [ "Eq" ]);
       (Nat, [ "Nat" ]);
@@ -879,13 +914,13 @@ let get_predeclared_ind_any n i =
       (Or, [ "Or" ]);
       (And, [ "And" ]);
       (Fin, [ "Fin" ]);
-      (UInt32, [ "UInt32" ]);
+      (UInt32 uint32_shape, [ "UInt32" ]);
       (BitVec, [ "BitVec" ]);
-      (Char, [ "Char" ]);
+      (Char char_shape, [ "Char" ]);
     ]
 
-let get_predeclared_ind_some n i =
-  match get_predeclared_ind_any n i with
+let get_predeclared_ind_some ~ctors ~uint32_is_legacy n i =
+  match get_predeclared_ind_any ~ctors ~uint32_is_legacy n i with
   | [] -> None
   | [ x ] -> Some x
   | _ :: _ :: _ ->
@@ -929,6 +964,7 @@ let get_predeclared_def_some n i =
 
 (* let get_predeclared_eq n i = get_predeclared_ind "eq" n i *)
 let mk_char_prim = "Char.mk.reflective_prim"
+let mk_char_prim_legacy = "Char.legacy.mk.reflective_prim"
 
 (*
 Register Nat_isValidChar as lean.Nat_isValidChar.
@@ -962,6 +998,23 @@ let add_declared n i inst =
         | None -> Some (Int.Map.singleton i inst)
         | Some m -> Some (Int.Map.add i inst m))
       !declared
+
+let declared_as n i registration =
+  match N.Map.find_opt n !declared with
+  | None -> false
+  | Some instances -> (
+    match Int.Map.find_opt i instances with
+    | None -> false
+    | Some { ref; _ } ->
+      GlobRef.CanOrd.equal ref (Rocqlib.lib_ref registration))
+
+let lookup_char_prim_ref () =
+  let char = N.append N.anon "Char" in
+  let prim =
+    if declared_as char 0 "lean.Char.legacy" then mk_char_prim_legacy
+    else mk_char_prim
+  in
+  Rocqlib.lib_ref ("lean." ^ prim)
 
 let to_univ_level' u uconv =
   match to_universe uconv.map u with
@@ -2506,8 +2559,7 @@ let rec to_constr =
         with_env_evm env uconv
           (fun env evd () ->
             let _, mkChar =
-              Evd.fresh_global env evd
-                (Rocqlib.lib_ref ("lean." ^ mk_char_prim))
+              Evd.fresh_global env evd (lookup_char_prim_ref ())
             in
             EConstr.to_constr evd mkChar)
           ()
@@ -2663,8 +2715,11 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
     add_declared nrec ((2 * i) + 1) { ref = Rocqlib.lib_ref (rec_base ^ ".ind"); algs = algs_2 };
     inst
   | None ->
+  let uint32_is_legacy =
+    declared_as (N.append N.anon "UInt32") 0 "lean.UInt32.legacy"
+  in
   let mind, algs, ind_name, cnames, univs, squashy =
-    match get_predeclared_ind_some n i with
+    match get_predeclared_ind_some ~ctors ~uint32_is_legacy n i with
     | Some (Eq, _, (ind_name, mind)) ->
       (* Hack to let the user predeclare eq and quot before running Lean Import
          TODO make a more general Register-like API? *)
@@ -2690,7 +2745,14 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
         univs,
         squashy )
     | Some
-        ( ((Nat | Nat_le | Or | And | Fin | UInt32 | BitVec | Char) as k),
+        ( ( ( Nat
+            | Nat_le
+            | Or
+            | And
+            | Fin
+            | UInt32 _
+            | BitVec
+            | Char _ ) as k ),
           _,
           (ind_name, mind) ) ->
       (* Hack to let the user predeclare various types before running Lean Import
