@@ -945,6 +945,8 @@ type predeclared_def_kind =
   | Add
   | Mult
   | Pow
+  | Pred
+  | Sub
   | Nat_isValidChar
   | IsValidChar_UInt32
   | IsValidChar_UInt32_match_1_1
@@ -1025,6 +1027,8 @@ let get_predeclared_def_any n i =
       (Add, [ "Nat"; "add" ]);
       (Mult, [ "Nat"; "mul" ]);
       (Pow, [ "Nat" ; "pow" ]);
+      (Pred, [ "Nat"; "pred" ]);
+      (Sub, [ "Nat"; "sub" ]);
       (Nat_isValidChar, [ "Nat"; "isValidChar" ]);
       ( IsValidChar_UInt32_match_1_1,
         [ "_private"; "Init"; "Prelude0"; "isValidChar_UInt32"; "match_1_1" ]
@@ -3188,7 +3192,13 @@ let reify_nat env evd term =
               binary "lean.Nat_pow" "lean.NatCertificate_pow" reflected_pow
             with
             | Some _ as result -> result
-            | None ->
+            | None -> (
+              match
+                binary "lean.Nat_sub" "lean.NatCertificate_sub"
+                  (fun a b -> Some (Z.max Z.zero (Z.sub a b)))
+              with
+              | Some _ as result -> result
+              | None ->
               let reduced =
                 expose_iota_scrutinee env term |> EConstr.of_constr
                 |> Reductionops.whd_betaiotazeta env evd
@@ -3233,7 +3243,7 @@ let reify_nat env evd term =
                   preserve_original
                     (reify (fuel - 1) unfolded (beta_apply head args))
                 | _ -> None)
-              | _ -> None)))
+              | _ -> None))))
   in
   reify 128 [] term
 
@@ -3721,6 +3731,8 @@ and declare_def { name = n; ty; body; univs; } i =
           | Add
           | Mult
           | Pow
+          | Pred
+          | Sub
           | Nat_isValidChar
           | IsValidChar_UInt32
           | IsValidChar_UInt32_match_1_1

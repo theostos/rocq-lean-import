@@ -22,5 +22,6 @@ uint32_modern.v
 string_of_list.v
 char_of_nat.v
 large_nat_conversion.v
+proof_producing_nat_sub.v
 primitive_record_eliminator.v
 record_valued_definition_eta.v
