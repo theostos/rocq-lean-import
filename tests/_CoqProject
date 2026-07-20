@@ -24,3 +24,4 @@ lowercase_hex.v
 large_nat_conversion.v
 char_of_nat.v
 primitive_record_eliminator.v
+record_valued_definition_eta.v
