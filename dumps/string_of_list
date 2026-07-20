@@ -1,0 +1,40 @@
+1 #NS 0 u
+2 #NS 0 list
+3 #NS 0 A
+4 #NS 2 nil
+5 #NS 2 cons
+6 #NS 0 a
+7 #NS 0 Char
+8 #NS 7 mk
+9 #NS 0 String
+10 #NS 9 ofByteArray
+11 #NS 9 ofList
+12 #NS 0 stringFromLiteral
+13 #NS 0 chars
+1 #US 0
+0 #ES 1
+1 #EP #BD 3 0 0
+2 #EC 2
+3 #EV 0
+4 #EA 2 3
+5 #EP #BD 3 0 4
+6 #EV 1
+7 #EA 2 6
+8 #EV 2
+9 #EA 2 8
+10 #EP #BD 6 7 9
+11 #EP #BD 6 3 10
+12 #EP #BI 3 0 11
+#IND 1 2 1 2 4 5 5 12
+13 #ES 1
+14 #EC 7
+#IND 0 7 13 1 8 14
+15 #EC 9
+#IND 0 9 13 1 10 15
+16 #EC 2
+17 #EC 7
+18 #EA 16 17
+19 #EP #BD 13 18 15
+#AX 11 19
+20 #ELS 52 6F 63 71
+#DEF 12 15 20
