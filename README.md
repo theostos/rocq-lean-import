@@ -382,6 +382,14 @@ nodes.  Partial applications retain the checked projection constant.  This
 keeps both sides of later conversions syntactically aligned without any
 library- or theorem-specific rewrite.
 
+Definitions whose result is a primitive record are also stored in eta-long
+form.  Their outer constructor can therefore be exposed without first reducing
+the original result to weak-head normal form; each field remains a primitive
+projection of that original body.  Primitive-record eta makes the replacement
+judgmentally equal to the Lean body, and Rocq checks it as the definition is
+declared.  This prevents a conversion against a record constructor from
+eagerly evaluating an unrelated recursive computation hidden in the result.
+
 ## Closed natural-number conversion certificates
 
 Large Lean natural numbers are compact kernel values.  Expanding the same

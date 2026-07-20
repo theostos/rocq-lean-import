@@ -2576,6 +2576,70 @@ let beta_apply head args =
   in
   apply head 0
 
+(** Give record-valued definitions an eta-long outer shape.  Conversion can
+    then expose the constructor without evaluating the definition's result;
+    its fields remain ordinary, independently checked projections of the
+    original body.  This is judgmentally equal to [body] for primitive records
+    and does not evaluate or trust the imported computation. *)
+let eta_expand_primitive_record_definition env evd ty body =
+  let binders, result = Term.decompose_lambda body in
+  let type_binders, result_ty = Term.decompose_prod ty in
+  if List.length binders <> List.length type_binders then body
+  else
+    let rel_context =
+      List.map
+        (fun (annot, binder_ty) -> RelDecl.LocalAssum (annot, binder_ty))
+        binders
+    in
+    let result_env = Environ.push_rel_context rel_context env in
+    let reduced_ty =
+      Reductionops.whd_all result_env evd (EConstr.of_constr result_ty)
+      |> EConstr.Unsafe.to_constr
+    in
+    let head, args = Constr.decompose_app reduced_ty in
+    match Constr.kind head with
+    | Constr.Ind (ind, instance) ->
+      let mib = Global.lookup_mind (fst ind) in
+      let packet = mib.mind_packets.(snd ind) in
+      (match packet.mind_record with
+      | Declarations.PrimRecord _ ->
+        let nparams = mib.mind_nparams in
+        let nfields = packet.mind_consnrealargs.(0) in
+        if Array.length args < nparams || nfields = 0 then body
+        else
+          let result_head, _ = Constr.decompose_app result in
+          (match Constr.kind result_head with
+          | Constr.Construct ((result_ind, 1), _)
+            when Names.Ind.UserOrd.equal result_ind ind -> body
+          | _ ->
+            let target = Constr.mkRel 1 in
+            let parameters =
+              Array.sub args 0 nparams |> Array.map (Vars.lift 1)
+            in
+            let fields =
+              Array.init nfields (fun proj_arg ->
+                  let projection, relevance =
+                    Declareops.inductive_make_projection ind mib ~proj_arg
+                  in
+                  Constr.mkProj
+                    (Projection.make projection false, relevance, target))
+            in
+            let rebuilt =
+              Constr.mkApp
+                ( Constr.mkConstructU ((ind, 1), instance),
+                  Array.append parameters fields )
+            in
+            let relevance =
+              Retyping.relevance_of_type result_env evd
+                (EConstr.of_constr result_ty)
+              |> EConstr.Unsafe.to_relevance
+            in
+            let annot = Context.make_annot Anonymous relevance in
+            Term.compose_lam binders
+              (Constr.mkLetIn (annot, result, result_ty, rebuilt)))
+      | _ -> body)
+    | _ -> body
+
 let unfold_head_once env term =
   let head, args = Constr.decompose_app term in
   match Constr.kind head with
@@ -3205,6 +3269,12 @@ and declare_def { name = n; ty; body; univs; } i =
       let body =
         with_env_evm empty_env uconv
           (fun env evd () -> maybe_transport_to_expected env evd ty body)
+          ()
+      in
+      let body =
+        with_env_evm empty_env uconv
+          (fun env evd () ->
+            eta_expand_primitive_record_definition env evd ty body)
           ()
       in
       let univs, algs = univ_entry uconv univs in
