@@ -327,6 +327,43 @@ Section strings.
   Definition Nat_isValidChar (n : Nat) : SProp
     := n < 0xd800 \/ (0xdfff < n /\ n < 0x110000).
 
+  Definition isValidChar_UInt32_match_1_1
+    (n : Nat) (motive : Nat_isValidChar n -> SProp)
+    (h : Nat_isValidChar n)
+    (h_1 : forall h : n < 0xd800, motive (Or_inl _ _ h))
+    (h_2 : forall (left : 0xdfff < n) (right : n < 0x110000),
+      motive (Or_inr _ _ (And_intro _ _ left right)))
+    : motive h
+    := match h with
+       | Or_inl _ _ h => h_1 h
+       | Or_inr _ _ h => h_2 (left _ _ h) (right _ _ h)
+       end.
+
+  Lemma isValidChar_UInt32 (n : Nat) (h : Nat_isValidChar n) :
+    n < UInt32_size.
+  Proof.
+    destruct h as [h | h].
+    - apply nat_le_Nat_le.
+      apply Nat_le_nat_le' in h.
+      cbv [UInt32_size Nat_of_num_uint Nat_of_N N.of_num_uint N.of_hex_uint
+        Pos.of_hex_uint Pos.of_hex_uint_acc] in *.
+      cbn [nat_of_Nat] in *.
+      rewrite ?nat2Natid in *.
+      change (N.to_nat 0xd800%N) with 55296%nat in h.
+      change (N.to_nat 0x100000000%N) with 4294967296%nat.
+      lia.
+    - destruct h as [_ h].
+      apply nat_le_Nat_le.
+      apply Nat_le_nat_le' in h.
+      cbv [UInt32_size Nat_of_num_uint Nat_of_N N.of_num_uint N.of_hex_uint
+        Pos.of_hex_uint Pos.of_hex_uint_acc] in *.
+      cbn [nat_of_Nat] in *.
+      rewrite ?nat2Natid in *.
+      change (N.to_nat 0x110000%N) with 1114112%nat in h.
+      change (N.to_nat 0x100000000%N) with 4294967296%nat.
+      lia.
+  Qed.
+
   Record Char_legacy@{} := Char_legacy_mk
   { val1_legacy : UInt32_legacy;
     valid_legacy : Nat_isValidChar val1_legacy.(val0).(val _) }.
@@ -365,6 +402,58 @@ Section strings.
     unfold Nat_of_N. rewrite N2Nat.inj_pow.
     eapply Nat_nat_pow. 
   Qed.
+
+  Lemma Nat_lt_to_N_pow_l (n : Nat) (m : N) :
+    (N_of_Nat n <? 2 ^ m)%N = true -> n < Nat_pow 2 (Nat_of_N m).
+  Proof.
+    rewrite <- Nat_pow_comm. eapply Nat_lt_to_N_l.
+  Qed.
+
+  Lemma N_ltb_of_Nat_lt_to_N (n : Nat) (m : N) :
+    n < Nat_of_N m -> (N_of_Nat n <? m)%N = true.
+  Proof.
+    intro H.
+    apply N.ltb_lt.
+    apply N2Z.inj_lt.
+    cbv [N_of_Nat].
+    rewrite nat_N_Z.
+    rewrite <- (N2Nat.id m).
+    rewrite nat_N_Z.
+    apply Nat_le_nat_le' in H.
+    cbv [Nat_of_N] in H.
+    cbn [nat_of_Nat] in H.
+    rewrite nat2Natid in H.
+    lia.
+  Qed.
+
+  Lemma isValidChar_pow32 (n : Nat) (h : Nat_isValidChar n) :
+    n < Nat_pow 2 32.
+  Proof.
+    destruct h as [h | h].
+    - change (n < Nat_pow 2 (Nat_of_N 32)).
+      apply Nat_lt_to_N_pow_l.
+      apply N.ltb_lt.
+      eapply N.lt_trans.
+      + apply N.ltb_lt.
+        apply (N_ltb_of_Nat_lt_to_N n 0xd800).
+        exact h.
+      + vm_compute. reflexivity.
+    - destruct h as [_ h].
+      change (n < Nat_pow 2 (Nat_of_N 32)).
+      apply Nat_lt_to_N_pow_l.
+      apply N.ltb_lt.
+      eapply N.lt_trans.
+      + apply N.ltb_lt.
+        apply (N_ltb_of_Nat_lt_to_N n 0x110000).
+        exact h.
+      + vm_compute. reflexivity.
+  Qed.
+
+  Definition Char_ofNatAux (n : Nat) (h : Nat_isValidChar n) : Char :=
+    Char_mk
+      (UInt32_ofBitVec
+        (BitVec_ofFin 32 (Fin_mk (Nat_pow 2 32) n (isValidChar_pow32 n h))))
+      h.
   
   Lemma Nat_lt_to_N_pow (n : N) (m : N) : (n <? 2 ^ m)%N = true -> Nat_of_N n < Nat_pow 2 (Nat_of_N m).
   Proof.
@@ -411,6 +500,36 @@ Section strings.
 
   Definition Char_mk_N (val : N) (isLt : ((val <? 0x100000000)%N && check_N_isValidChar val)%bool = true) : Char
     := Char_mk (UInt32_mk_N val (proj1 (andb_prop _ _ isLt))) (Nat_isValidChar_mk_N val (proj2 (andb_prop _ _ isLt))).
+
+  Lemma Nat_of_N_N_of_Nat (n : Nat) : Nat_of_N (N_of_Nat n) = n.
+  Proof.
+    cbv [Nat_of_N N_of_Nat].
+    rewrite Nat2N.id.
+    apply Nat2natid.
+  Qed.
+
+  Lemma Nat_isValidChar_of_check_N (n : Nat) :
+    check_N_isValidChar (N_of_Nat n) = true -> Nat_isValidChar n.
+  Proof.
+    intro H.
+    rewrite <- Nat_of_N_N_of_Nat.
+    apply Nat_isValidChar_mk_N.
+    exact H.
+  Qed.
+
+  Lemma Nat_isValidChar_zero : Nat_isValidChar 0.
+  Proof.
+    change (Nat_isValidChar (Nat_of_N 0)).
+    apply Nat_isValidChar_mk_N.
+    vm_compute. reflexivity.
+  Qed.
+
+  Definition Char_ofNat (n : Nat) : Char :=
+    match check_N_isValidChar (N_of_Nat n) as isValid
+          return check_N_isValidChar (N_of_Nat n) = isValid -> Char with
+    | true => fun H => Char_ofNatAux n (Nat_isValidChar_of_check_N n H)
+    | false => fun _ => Char_ofNatAux 0 Nat_isValidChar_zero
+    end Logic.eq_refl.
 
   Definition Char_legacy_mk_N
     (val : N)
@@ -495,6 +614,10 @@ Section strings.
 End strings.
 
 Register Nat_isValidChar as lean.Nat_isValidChar.
+Register isValidChar_UInt32_match_1_1 as lean._private_Init_Prelude0_isValidChar_UInt32_match_1_1.
+Register isValidChar_UInt32 as lean._private_Init_Prelude0_isValidChar_UInt32.
+Register Char_ofNatAux as lean.Char_ofNatAux.
+Register Char_ofNat as lean.Char_ofNat.
 Register Char as lean.Char.
 Register Char_legacy as lean.Char.legacy.
 Register reflective_Char_mk_prim as lean.Char.mk.reflective_prim.

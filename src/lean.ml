@@ -876,7 +876,16 @@ type predeclared_ind_kind =
   | UInt32 of core_shape
   | BitVec
   | Char of core_shape
-type predeclared_def_kind = UInt32_size | Add | Mult | Pow | Nat_isValidChar
+type predeclared_def_kind =
+  | UInt32_size
+  | Add
+  | Mult
+  | Pow
+  | Nat_isValidChar
+  | IsValidChar_UInt32
+  | IsValidChar_UInt32_match_1_1
+  | Char_ofNatAux
+  | Char_ofNat
 type predeclared_ind_as_def_kind = ULift_cumul
 
 let get_predeclared_cnames (k : predeclared_ind_kind) n =
@@ -953,6 +962,13 @@ let get_predeclared_def_any n i =
       (Mult, [ "Nat"; "mul" ]);
       (Pow, [ "Nat" ; "pow" ]);
       (Nat_isValidChar, [ "Nat"; "isValidChar" ]);
+      ( IsValidChar_UInt32_match_1_1,
+        [ "_private"; "Init"; "Prelude0"; "isValidChar_UInt32"; "match_1_1" ]
+      );
+      ( IsValidChar_UInt32,
+        [ "_private"; "Init"; "Prelude0"; "isValidChar_UInt32" ] );
+      (Char_ofNatAux, [ "Char"; "ofNatAux" ]);
+      (Char_ofNat, [ "Char"; "ofNat" ]);
     ]
 
 let get_predeclared_def_some n i =
@@ -3074,7 +3090,18 @@ and ensure_exists n i =
 and declare_def { name = n; ty; body; univs; } i =
   let ref, algs =
     match get_predeclared_def_some n i with
-    | Some ((UInt32_size | Add | Mult | Pow | Nat_isValidChar), _, (def_name, c)) ->
+    | Some
+        ( ( UInt32_size
+          | Add
+          | Mult
+          | Pow
+          | Nat_isValidChar
+          | IsValidChar_UInt32
+          | IsValidChar_UInt32_match_1_1
+          | Char_ofNatAux
+          | Char_ofNat ),
+          _,
+          (def_name, c) ) ->
       (* Hack to let the user predeclare some constants
          TODO make a more general Register-like API? *)
       Feedback.msg_info Pp.(Id.print def_name ++ str " is predeclared");

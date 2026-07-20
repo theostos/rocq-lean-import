@@ -19,3 +19,4 @@ mutual_nested_recursor.v
 nested_record_containers.v
 uint32_modern.v
 string_of_list.v
+char_of_nat.v
