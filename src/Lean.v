@@ -334,7 +334,6 @@ Register Nat_beq as lean.Nat_beq.
 Register Nat_ble as lean.Nat_ble.
 Register Nat_blt as lean.Nat_blt.
 Register Nat_decEq as lean.Nat_decEq.
-Register Nat_of_N as lean.Nat_of_N.
 
 Import NArith.
 
@@ -444,12 +443,29 @@ Proof.
   - now rewrite IH.
 Qed.
 
-Lemma NatCertificate_of_N (n : N) : NatCertificate (Nat_of_N n) n.
+Lemma NatCertificate_of_N (n : N) :
+  NatCertificate (Nat_of_N n) n.
 Proof.
   unfold NatCertificate, N_of_Nat, Nat_of_N.
   rewrite nat2Natid_logic, N2Nat.id.
   reflexivity.
 Qed.
+
+(** Fused binary decoding exposes only the constructors demanded by the
+    consumer.  In contrast, [Nat_of_nat (N.to_nat n)] first allocates the
+    complete unary intermediate before Lean's [Nat] can be inspected. *)
+Fixpoint CompactPos (p : positive) : Nat :=
+  match p with
+  | xH => Nat_succ Nat_zero
+  | xO p => double (CompactPos p)
+  | xI p => Nat_succ (double (CompactPos p))
+  end.
+
+Definition CompactNat (n : N) : Nat :=
+  match n with
+  | N0 => Nat_zero
+  | Npos p => CompactPos p
+  end.
 
 Lemma NatCertificate_succ (x : Nat) (n : N) :
   NatCertificate x n -> NatCertificate (Nat_succ x) (N.succ n).
@@ -459,6 +475,52 @@ Proof.
   intro H.
   now rewrite Nat2N.inj_succ, H.
 Qed.
+
+Import Lia.
+
+Lemma nat_of_Nat_double_logic (x : Nat) :
+  Logic.eq (nat_of_Nat (double x)) (2 * nat_of_Nat x)%nat.
+Proof.
+  induction x as [|x IH]; cbn [double nat_of_Nat].
+  - reflexivity.
+  - rewrite IH. lia.
+Qed.
+
+Lemma NatCertificate_double (x : Nat) (n : N) :
+  NatCertificate x n -> NatCertificate (double x) (2 * n)%N.
+Proof.
+  unfold NatCertificate, N_of_Nat.
+  intro H.
+  rewrite nat_of_Nat_double_logic, Nat2N.inj_mul, H.
+  reflexivity.
+Qed.
+
+Lemma NatCertificate_CompactPos (p : positive) :
+  NatCertificate (CompactPos p) (Npos p).
+Proof.
+  induction p as [p IH|p IH|]; cbn [CompactPos].
+  - change
+      (NatCertificate (Nat_succ (double (CompactPos p)))
+         (N.succ (2 * Npos p)%N)).
+    apply NatCertificate_succ.
+    exact (NatCertificate_double _ _ IH).
+  - change
+      (NatCertificate (double (CompactPos p)) (2 * Npos p)%N).
+    exact (NatCertificate_double _ _ IH).
+  - unfold NatCertificate, N_of_Nat. reflexivity.
+Qed.
+
+Lemma NatCertificate_CompactNat (n : N) :
+  NatCertificate (CompactNat n) n.
+Proof.
+  destruct n as [|p]; cbn [CompactNat].
+  - exact NatCertificate_zero.
+  - exact (NatCertificate_CompactPos p).
+Qed.
+
+(** [CompactNat] is kept transparent so weak-head reduction can reveal one
+    constructor at a time without first materializing the complete unary
+    normal form. *)
 
 Lemma NatCertificate_add (a b : Nat) (na nb : N) :
   NatCertificate a na -> NatCertificate b nb ->
@@ -637,7 +699,7 @@ Definition Nat_transport_sprop (P : Nat -> SProp)
 
 Register NatCertificate as lean.NatCertificate.
 Register NatCertificate_zero as lean.NatCertificate_zero.
-Register NatCertificate_of_N as lean.NatCertificate_of_N.
+Register NatCertificate_CompactNat as lean.NatCertificate_of_N.
 Register NatCertificate_succ as lean.NatCertificate_succ.
 Register NatCertificate_add as lean.NatCertificate_add.
 Register NatCertificate_mul as lean.NatCertificate_mul.
@@ -653,6 +715,7 @@ Register NatCertificate_beq as lean.NatCertificate_beq.
 Register NatCertificate_ble as lean.NatCertificate_ble.
 Register NatCertificate_blt as lean.NatCertificate_blt.
 Register Bool_transport_sprop as lean.Bool_transport_sprop.
+Register CompactNat as lean.Nat_of_N.
 
 #[local] Set Warnings "-abstract-large-number".
 Definition UInt32_size : Nat := 0x100000000%Nat.
