@@ -4243,6 +4243,32 @@ let reify_bool env evd term =
       ( Constr.mkConstU (constant, instance),
         local_arguments local_env )
   in
+  let compact_bool_state term =
+    let depth_limit = 3 in
+    let shareable term =
+      match Constr.kind term with
+      | App _ | Cast _ | Prod _ | Lambda _ | LetIn _ | Case _ | Proj _
+      | Fix _ | CoFix _ | Array _ -> true
+      | Rel _ | Var _ | Meta _ | Evar _ | Sort _ | Const _ | Ind _
+      | Construct _ | Int _ | Float _ | String _ -> false
+    in
+    let rec compact depth binders term =
+      let should_share =
+        binders = 0 && depth >= depth_limit && shareable term
+      in
+      let child_depth = if should_share then 1 else depth + 1 in
+      let term =
+        Constr.map_with_binders
+          (fun binders -> binders + 1)
+          (compact child_depth) binders term
+      in
+      if should_share then
+        share_transparent_definition "_lean_import_bool_node"
+          (refresh_local_env env) term
+      else term
+    in
+    compact 0 0 term
+  in
   let rec prune_dead_leading_lets term =
     match Constr.kind term with
     | LetIn (annot, value, ty, body) ->
@@ -4993,8 +5019,9 @@ let reify_bool env evd term =
       if already_shared then term
       else
         match !last_shared_bool_state with
-        | Some (known, shared) when Constr.equal known term -> shared
+        | Some (known, shared) when known == term -> shared
         | _ ->
+        let term = compact_bool_state term in
         let shared =
           share_transparent_definition ~types:bool
             "_lean_import_bool_state" env term
@@ -5159,7 +5186,7 @@ let reify_bool env evd term =
                   else
                     Constr.mkCast
                       ( result.bool_proof,
-                        Constr.NATIVEcast,
+                        Constr.DEFAULTcast,
                         cert_app "lean.BoolCertificate"
                           [ rewritten; coq_bool result.bool_value ] )
                 in
@@ -5208,7 +5235,7 @@ let reify_bool env evd term =
                   else
                     Constr.mkCast
                       ( result.bool_proof,
-                        Constr.NATIVEcast,
+                        Constr.DEFAULTcast,
                         cert_app "lean.BoolCertificate"
                           [ rewritten; coq_bool result.bool_value ] )
                 in
@@ -5345,53 +5372,74 @@ let reify_bool env evd term =
       let left, right, proof =
         share_bool_equality chunk_origin current chunk
       in
-      (left, right, proof) :: segments
+      (left, right, proof) :: segments, right
     in
-    let rec append_step segments chunk_origin chunk chunk_length current
-        left right proof =
-      if not (Constr.equal current left) then
-        let defeq = refl current in
-        let state =
-          append_step segments chunk_origin chunk chunk_length current
-            current left defeq
+    let append_contiguous segments chunk_origin chunk chunk_length left right
+        proof =
+      let chunk = trans chunk_origin left right chunk proof in
+      let chunk_length = chunk_length + 1 in
+      if chunk_length >= chunk_limit then
+        let segments, current =
+          checkpoint segments chunk_origin chunk right
         in
-        let segments, chunk_origin, chunk, chunk_length, current = state in
-        append_step segments chunk_origin chunk chunk_length current left right
-          proof
-      else
-        let chunk = trans chunk_origin left right chunk proof in
-        let chunk_length = chunk_length + 1 in
-        if chunk_length >= chunk_limit then
-          let segments = checkpoint segments chunk_origin chunk right in
-          segments, right, refl right, 0, right
-        else segments, chunk_origin, chunk, chunk_length, right
+        segments, current, refl current, 0, current
+      else segments, chunk_origin, chunk, chunk_length, right
+    in
+    let append_step segments chunk_origin chunk chunk_length current left right
+        proof =
+      let segments, chunk_origin, chunk, chunk_length, current =
+        if current == left then
+          segments, chunk_origin, chunk, chunk_length, current
+        else
+          append_contiguous segments chunk_origin chunk chunk_length current
+            left (defeq current left)
+      in
+      append_contiguous segments chunk_origin chunk chunk_length left right
+        proof
     in
     let finish segments chunk_origin chunk chunk_length current result =
-      let equality, endpoint =
+      let add_edge edges endpoint left right proof =
+        let edges =
+          if endpoint == left then
+            (left, right, proof) :: edges
+          else
+            (left, right, proof)
+            :: (endpoint, left, defeq endpoint left)
+            :: edges
+        in
+        edges, right
+      in
+      let edges, endpoint =
         List.fold_left
-          (fun (equality, endpoint) (left, right, segment) ->
-            let equality =
-              if Constr.equal endpoint left then equality
-              else
-                trans original endpoint left equality
-                  (defeq endpoint left)
-            in
-            trans original left right equality segment, right)
-          (refl original, original) (List.rev segments)
+          (fun (edges, endpoint) (left, right, segment) ->
+            add_edge edges endpoint left right segment)
+          ([], original) (List.rev segments)
+      in
+      let edges, endpoint =
+        if chunk_length = 0 then edges, endpoint
+        else add_edge edges endpoint chunk_origin current chunk
+      in
+      let edges = Array.of_list (List.rev edges) in
+      let rec compose lo hi =
+        if hi - lo = 1 then edges.(lo)
+        else
+          let middle = lo + ((hi - lo) / 2) in
+          let left, left_endpoint, first = compose lo middle in
+          let right_origin, right, second = compose middle hi in
+          if left_endpoint != right_origin then
+            raise Not_found;
+          left, right, trans left left_endpoint right first second
       in
       let equality, endpoint =
-        if chunk_length = 0 then equality, endpoint
+        if Array.length edges = 0 then refl original, original
         else
-          let equality =
-            if Constr.equal endpoint chunk_origin then equality
-            else
-              trans original endpoint chunk_origin equality
-                (defeq endpoint chunk_origin)
+          let origin, endpoint, equality =
+            compose 0 (Array.length edges)
           in
-          ( trans original chunk_origin current equality chunk,
-            current )
+          if origin != original then raise Not_found;
+          equality, endpoint
       in
-      if not (Constr.equal endpoint current) then raise Not_found;
+      if endpoint != current then raise Not_found;
       let result =
         {
           bool_term = original;
@@ -5576,24 +5624,23 @@ let reify_bool env evd term =
           | None -> (
             let continue ?(isolated = false) left right proof =
               let segments, chunk_origin, chunk, chunk_length, current =
-                if isolated && chunk_length <> 0 then
-                  let segments =
-                    checkpoint segments chunk_origin chunk current
-                  in
-                  segments, current, refl current, 0, current
-                else segments, chunk_origin, chunk, chunk_length, current
-              in
-              let segments, chunk_origin, chunk, chunk_length, current =
                 append_step segments chunk_origin chunk chunk_length current
                   left right proof
               in
               let segments, chunk_origin, chunk, chunk_length, current =
-                if isolated && chunk_length <> 0 then
-                  let segments =
+                if not isolated then
+                  segments, chunk_origin, chunk, chunk_length, current
+                else if chunk_length <> 0 then
+                  let segments, current =
                     checkpoint segments chunk_origin chunk current
                   in
                   segments, current, refl current, 0, current
-                else segments, chunk_origin, chunk, chunk_length, current
+                else
+                  match !last_shared_bool_state with
+                  | Some (known, shared) when known == current ->
+                    segments, shared, refl shared, 0, shared
+                  | _ ->
+                    segments, chunk_origin, chunk, chunk_length, current
               in
               evaluate (fuel - 1) segments chunk_origin chunk chunk_length
                 current

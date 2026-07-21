@@ -443,7 +443,7 @@ Proof.
   - now rewrite IH.
 Qed.
 
-Lemma NatCertificate_of_N_transparent (n : N) :
+Lemma NatCertificate_of_N (n : N) :
   NatCertificate (Nat_of_N n) n.
 Proof.
   unfold NatCertificate, N_of_Nat, Nat_of_N.
@@ -510,7 +510,8 @@ Proof.
   - unfold NatCertificate, N_of_Nat. reflexivity.
 Qed.
 
-Lemma NatCertificate_of_N (n : N) : NatCertificate (CompactNat n) n.
+Lemma NatCertificate_CompactNat (n : N) :
+  NatCertificate (CompactNat n) n.
 Proof.
   destruct n as [|p]; cbn [CompactNat].
   - exact NatCertificate_zero.
@@ -871,7 +872,7 @@ Definition Bool_transport_sprop (P : Bool -> SProp)
 
 Register NatCertificate as lean.NatCertificate.
 Register NatCertificate_zero as lean.NatCertificate_zero.
-Register NatCertificate_of_N as lean.NatCertificate_of_N.
+Register NatCertificate_CompactNat as lean.NatCertificate_of_N.
 Register NatCertificate_succ as lean.NatCertificate_succ.
 Register NatCertificate_add as lean.NatCertificate_add.
 Register NatCertificate_mul as lean.NatCertificate_mul.
