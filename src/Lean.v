@@ -133,6 +133,12 @@ Record And@{} (a a0 : SProp) : SProp := And_intro
 Register And as lean.And.
 
 Inductive sEmpty : SProp := .
+Register sEmpty as lean.False.
+
+Inductive Decidable (p : SProp) : Type :=
+| Decidable_isFalse : (p -> sEmpty) -> Decidable p
+| Decidable_isTrue : p -> Decidable p.
+Register Decidable as lean.Decidable.
 
 Section nat_notation.
   Import ZifyClasses ZArith NArith.
@@ -287,6 +293,38 @@ Fixpoint Nat_ble n m :=
 
 Definition Nat_blt n m := Nat_ble (Nat_succ n) m.
 
+Lemma Nat_beq_refl (n : Nat) : Logic.eq (Nat_beq n n) Bool_true.
+Proof.
+  induction n as [|n IH]; cbn [Nat_beq]; assumption || reflexivity.
+Qed.
+
+Lemma Nat_beq_true_eq (n m : Nat) :
+  Logic.eq (Nat_beq n m) Bool_true -> eq n m.
+Proof.
+  revert m.
+  induction n as [|n IH]; intros [|m] H; cbn [Nat_beq] in H.
+  - exact (eq_refl Nat_zero).
+  - discriminate H.
+  - discriminate H.
+  - destruct (IH m H). constructor.
+Qed.
+
+Lemma Nat_beq_false_ne (n m : Nat) :
+  Logic.eq (Nat_beq n m) Bool_false -> eq n m -> sEmpty.
+Proof.
+  intros H E.
+  destruct E.
+  rewrite Nat_beq_refl in H.
+  discriminate H.
+Qed.
+
+Definition Nat_decEq (n m : Nat) : Decidable (eq n m).
+Proof.
+  destruct (Nat_beq n m) eqn:H.
+  - exact (Decidable_isFalse _ (Nat_beq_false_ne n m H)).
+  - exact (Decidable_isTrue _ (Nat_beq_true_eq n m H)).
+Defined.
+
 Register Nat_add as lean.Nat_add.
 Register Nat_mul as lean.Nat_mul.
 Register Nat_pow as lean.Nat_pow.
@@ -295,6 +333,7 @@ Register Nat_sub as lean.Nat_sub.
 Register Nat_beq as lean.Nat_beq.
 Register Nat_ble as lean.Nat_ble.
 Register Nat_blt as lean.Nat_blt.
+Register Nat_decEq as lean.Nat_decEq.
 Register Nat_of_N as lean.Nat_of_N.
 
 Import NArith.
