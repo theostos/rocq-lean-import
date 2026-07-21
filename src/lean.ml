@@ -932,6 +932,8 @@ type core_shape = Legacy | Modern
 
 type predeclared_ind_kind =
   | Eq
+  | False
+  | Decidable
   | Bool
   | Nat
   | Nat_le
@@ -951,6 +953,7 @@ type predeclared_def_kind =
   | Beq
   | Ble
   | Blt
+  | Nat_decEq
   | Nat_isValidChar
   | IsValidChar_UInt32
   | IsValidChar_UInt32_match_1_1
@@ -961,6 +964,8 @@ type predeclared_ind_as_def_kind = ULift_cumul
 let get_predeclared_cnames (k : predeclared_ind_kind) n =
   match k with
   | Eq -> [ N.append n "refl" ]
+  | False -> []
+  | Decidable -> [ N.append n "isFalse"; N.append n "isTrue" ]
   | Bool -> [ N.append n "false"; N.append n "true" ]
   | Nat -> [ N.append n "zero"; N.append n "succ" ]
   | Nat_le -> [ N.append n "refl"; N.append n "step" ]
@@ -989,6 +994,8 @@ let get_predeclared_ind_any ~ctors ~uint32_is_legacy n i =
       |> Option.map (fun x -> (indk, indh, x)))
     [
       (Eq, [ "Eq" ]);
+      (False, [ "False" ]);
+      (Decidable, [ "Decidable" ]);
       (Bool, [ "Bool" ]);
       (Nat, [ "Nat" ]);
       (Nat_le, [ "Nat"; "le" ]);
@@ -1038,6 +1045,7 @@ let get_predeclared_def_any n i =
       (Beq, [ "Nat"; "beq" ]);
       (Ble, [ "Nat"; "ble" ]);
       (Blt, [ "Nat"; "blt" ]);
+      (Nat_decEq, [ "Nat"; "decEq" ]);
       (Nat_isValidChar, [ "Nat"; "isValidChar" ]);
       ( IsValidChar_UInt32_match_1_1,
         [ "_private"; "Init"; "Prelude0"; "isValidChar_UInt32"; "match_1_1" ]
@@ -1743,6 +1751,13 @@ let declare_last_field_all_scheme mind ind_name source_uctx projections =
 let rec decompose_lean_app acc = function
   | App (f, x) -> decompose_lean_app (x :: acc) f
   | head -> (head, acc)
+
+let eager_reduce_name = N.append N.anon "eagerReduce"
+
+let is_eager_reduce_application expression =
+  match fst (decompose_lean_app [] expression) with
+  | Const (name, _) -> N.equal name eager_reduce_name
+  | _ -> false
 
 let constr_app f args =
   match args with [] -> f | _ -> Constr.mkApp (f, Array.of_list args)
@@ -3121,7 +3136,39 @@ let reflected_pow base exponent =
       let value = Z.pow base (Z.to_int exponent) in
       if reflected_size_ok value then Some value else None
 
-let reify_nat env evd term =
+let close_local_definitions env depth term =
+  let debug = Option.has_some (Sys.getenv_opt "ROCQ_LEAN_CERT_DEBUG") in
+  let unfolded = ref 0 in
+  let rec close binders term =
+    match Constr.kind term with
+    | Rel index when index > binders ->
+      let context_index = index - binders in
+      if context_index > depth then raise Not_found;
+      (match Environ.lookup_rel context_index env with
+      | RelDecl.LocalDef (_, value, _) ->
+        incr unfolded;
+        if debug && depth > 100 && !unfolded <= 20 then
+          Printf.eprintf
+            "[bool-certificate] close local rel=%d binders=%d\n%!"
+            context_index binders;
+        close binders
+          (Vars.lift binders (Vars.lift context_index value))
+      | RelDecl.LocalAssum _ -> raise Not_found)
+    | _ ->
+      Constr.map_with_binders (fun binders -> binders + 1) close binders term
+  in
+  try
+    let term = close 0 term in
+    if debug && depth > 100 then
+      Printf.eprintf
+        "[bool-certificate] closed local operand unfolds=%d\n%!" !unfolded;
+    if Vars.closed0 term then Some term else None
+  with Not_found -> None
+
+let reify_nat ?(depth = 0) env evd term =
+  if not (Vars.closedn depth term) then None
+  else
+  Option.bind (close_local_definitions env depth term) (fun term ->
   let rec reify fuel unfolded term =
     let preserve_original result =
       Option.map (fun certificate -> { certificate with nat_term = term }) result
@@ -3254,9 +3301,10 @@ let reify_nat env evd term =
                 | _ -> None)
               | _ -> None))))
   in
-  reify 128 [] term
+  reify 128 [] term)
 
 type certificate_path_step =
+  | AppFunction
   | AppArgument of int
   | ProdDomain
   | ProdCodomain
@@ -3265,6 +3313,24 @@ type certificate_path_step =
   | LetValue
   | LetType
   | LetBody
+  | CaseScrutinee
+  | ProjectionScrutinee
+
+let string_of_certificate_path path =
+  let step = function
+    | AppFunction -> "fun"
+    | AppArgument index -> "arg" ^ string_of_int index
+    | ProdDomain -> "prod-domain"
+    | ProdCodomain -> "prod-codomain"
+    | LambdaDomain -> "lambda-domain"
+    | LambdaBody -> "lambda-body"
+    | LetValue -> "let-value"
+    | LetType -> "let-type"
+    | LetBody -> "let-body"
+    | CaseScrutinee -> "case-scrutinee"
+    | ProjectionScrutinee -> "projection-scrutinee"
+  in
+  String.concat "/" (List.map step path)
 
 let rec first_certified_nat_difference env evd path actual expected =
   if Constr.equal actual expected then None
@@ -3335,6 +3401,10 @@ let rec first_certified_nat_difference env evd path actual expected =
 let replace_certificate_path term path replacement =
   let rec replace depth term = function
     | [] -> Vars.lift depth replacement
+    | AppFunction :: rest ->
+      let head, args = Constr.decompose_app term in
+      let head = replace depth head rest in
+      if Array.length args = 0 then head else Constr.mkApp (head, args)
     | AppArgument index :: rest ->
       let head, args = Constr.decompose_app term in
       if index >= Array.length args then assert false;
@@ -3362,8 +3432,2327 @@ let replace_certificate_path term path replacement =
     | LetBody :: rest ->
       let annot, value, ty, body = Constr.destLetIn term in
       Constr.mkLetIn (annot, value, ty, replace (depth + 1) body rest)
+    | CaseScrutinee :: rest ->
+      let info, instance, params, return, invert, scrutinee, branches =
+        Constr.destCase term
+      in
+      Constr.mkCase
+        ( info,
+          instance,
+          params,
+          return,
+          invert,
+          replace depth scrutinee rest,
+          branches )
+    | ProjectionScrutinee :: rest ->
+      let projection, relevance, scrutinee = Constr.destProj term in
+      Constr.mkProj
+        (projection, relevance, replace depth scrutinee rest)
   in
   replace 0 term path
+
+let _first_physical_difference actual reduced =
+  let rec difference path actual reduced =
+    if actual == reduced then None
+    else
+      match Constr.kind actual, Constr.kind reduced with
+      | LetIn (_, actual_value, actual_type, actual_body),
+        LetIn (_, reduced_value, reduced_type, reduced_body)
+        when actual_value == reduced_value && actual_type == reduced_type ->
+        difference (LetBody :: path) actual_body reduced_body
+      | App _, App _ ->
+        let actual_head, actual_args = Constr.decompose_app actual in
+        let reduced_head, reduced_args = Constr.decompose_app reduced in
+        if Array.length actual_args <> Array.length reduced_args then
+          Some (List.rev path)
+        else if actual_head != reduced_head then
+          (match
+             difference (AppFunction :: path) actual_head reduced_head
+           with
+          | Some _ as result -> result
+          | None -> Some (List.rev path))
+        else
+          let rec argument index =
+            if index = Array.length actual_args then Some (List.rev path)
+            else if actual_args.(index) == reduced_args.(index) then
+              argument (index + 1)
+            else
+              difference (AppArgument index :: path) actual_args.(index)
+                reduced_args.(index)
+          in
+          argument 0
+      | Case (_, _, _, _, _, actual_scrutinee, _),
+        Case (_, _, _, _, _, reduced_scrutinee, _)
+        when actual_scrutinee != reduced_scrutinee ->
+        difference (CaseScrutinee :: path) actual_scrutinee
+          reduced_scrutinee
+      | Proj (_, _, actual_scrutinee), Proj (_, _, reduced_scrutinee)
+        when actual_scrutinee != reduced_scrutinee ->
+        difference (ProjectionScrutinee :: path) actual_scrutinee
+          reduced_scrutinee
+      | _ -> Some (List.rev path)
+  in
+  difference [] actual reduced
+
+let subterm_at_certificate_path term path =
+  List.fold_left
+    (fun term step ->
+      match step with
+      | AppFunction -> fst (Constr.decompose_app term)
+      | AppArgument index ->
+        let _, args = Constr.decompose_app term in
+        args.(index)
+      | CaseScrutinee ->
+        let _, _, _, _, _, scrutinee, _ = Constr.destCase term in
+        scrutinee
+      | ProjectionScrutinee ->
+        let _, _, scrutinee = Constr.destProj term in
+        scrutinee
+      | ProdDomain -> let _, domain, _ = Constr.destProd term in domain
+      | ProdCodomain -> let _, _, body = Constr.destProd term in body
+      | LambdaDomain -> let _, domain, _ = Constr.destLambda term in domain
+      | LambdaBody -> let _, _, body = Constr.destLambda term in body
+      | LetValue -> let _, value, _, _ = Constr.destLetIn term in value
+      | LetType -> let _, _, ty, _ = Constr.destLetIn term in ty
+      | LetBody -> let _, _, _, body = Constr.destLetIn term in body)
+    term path
+
+let atomic_type_level env evd term =
+  try
+    let ty =
+      Retyping.get_type_of env evd (EConstr.of_constr term)
+      |> EConstr.Unsafe.to_constr
+    in
+    let sort =
+      Retyping.get_type_of env evd (EConstr.of_constr ty)
+      |> Reductionops.whd_all env evd |> EConstr.Unsafe.to_constr
+      |> Constr.destSort
+    in
+    if Sorts.is_sprop sort || Sorts.is_prop sort then None
+    else Univ.Universe.level (Sorts.univ_of_sort sort)
+  with _ -> None
+
+let registered_ref_at_level key level =
+  let instance = UVars.Instance.of_array ([||], [| level |]) in
+  Constr.mkRef (Rocqlib.lib_ref key, instance)
+
+let registered_ref_at_levels key levels =
+  let instance =
+    UVars.Instance.of_array ([||], Array.of_list levels)
+  in
+  Constr.mkRef (Rocqlib.lib_ref key, instance)
+
+type bool_certificate = {
+  bool_term : Constr.t;
+  bool_value : bool;
+  bool_proof : Constr.t;
+}
+
+type bool_equality = {
+  bool_equality_left : Constr.t;
+  bool_equality_right : Constr.t;
+  bool_equality_resume : Constr.t;
+  bool_equality_proof : Constr.t;
+}
+
+let coq_bool value =
+  registered_ref (if value then "core.bool.true" else "core.bool.false")
+
+(** Store an intermediate certificate as an opaque Rocq lemma.  The kernel
+    checks [bool_proof] before installing the constant, while later
+    certificate segments retain only its type and a constant reference.  This
+    is the sharing boundary that keeps proof-producing evaluation from
+    duplicating every intermediate term in one enormous proof object. *)
+let share_bool_certificate certificate =
+  Gc.full_major ();
+  Gc.compact ();
+  if Option.has_some (Sys.getenv_opt "ROCQ_LEAN_CERT_DEBUG") then (
+    let stats = Gc.quick_stat () in
+    Printf.eprintf
+      "[bool-certificate] compacted heap live_words=%d heap_words=%d\n%!"
+      stats.Gc.live_words stats.Gc.heap_words);
+  let base = Id.of_string "_lean_import_bool_certificate" in
+  let name =
+    Namegen.next_global_ident_away (Global.safe_env ()) base Id.Set.empty
+  in
+  let types =
+    cert_app "lean.BoolCertificate"
+      [ certificate.bool_term; coq_bool certificate.bool_value ]
+  in
+  let univs =
+    ( UState.Monomorphic_entry Univ.ContextSet.empty,
+      UnivNames.empty_binders )
+  in
+  let entry =
+    Declare.definition_entry ~opaque:true ~types ~univs certificate.bool_proof
+  in
+  if Option.has_some (Sys.getenv_opt "ROCQ_LEAN_CERT_DEBUG") then
+    Printf.eprintf "[bool-certificate] checking shared segment %s\n%!"
+      (Id.to_string name);
+  if Option.has_some (Sys.getenv_opt "ROCQ_LEAN_CERT_VALIDATE") then (
+    Printf.eprintf "[bool-certificate] inferring shared proof %s\n%!"
+      (Id.to_string name);
+    ignore
+      (Retyping.get_type_of (Global.env ()) Evd.empty
+         (EConstr.of_constr certificate.bool_proof));
+    Printf.eprintf "[bool-certificate] inferred shared proof %s\n%!"
+      (Id.to_string name));
+  let constant =
+    Declare.declare_constant ~name ~kind:Decls.(IsProof Lemma)
+      (Declare.DefinitionEntry entry)
+  in
+  if Option.has_some (Sys.getenv_opt "ROCQ_LEAN_CERT_DEBUG") then
+    Printf.eprintf "[bool-certificate] shared segment %s\n%!"
+      (Id.to_string name);
+  { certificate with
+    bool_proof = Constr.mkConstU (constant, UVars.Instance.empty) }
+
+let lean_bool_constructor value =
+  match Rocqlib.lib_ref "lean.Bool" with
+  | GlobRef.IndRef ind ->
+    Constr.mkConstructU
+      ((ind, if value then 2 else 1), UVars.Instance.empty)
+  | _ -> assert false
+
+let lean_nat_constructor index =
+  match Rocqlib.lib_ref "lean.Nat" with
+  | GlobRef.IndRef ind ->
+    Constr.mkConstructU ((ind, index), UVars.Instance.empty)
+  | _ -> assert false
+
+let bool_constructor_value env term =
+  let head, args = Constr.decompose_app term in
+  if Array.length args <> 0 then None
+  else
+    match Rocqlib.lib_ref "lean.Bool", Constr.kind head with
+    | GlobRef.IndRef ind, Construct ((constructor_ind, index), _)
+      when Environ.QInd.equal env ind constructor_ind ->
+      if index = 1 then Some false
+      else if index = 2 then Some true
+      else None
+    | _ -> None
+
+let is_nat_type env evd term =
+  try
+    let ty =
+      Retyping.get_type_of env evd (EConstr.of_constr term)
+      |> Reductionops.whd_all env evd |> EConstr.Unsafe.to_constr
+    in
+    ref_matches env (fst (Constr.decompose_app ty)) "lean.Nat"
+  with _ -> false
+
+let is_bool_type env evd term =
+  try
+    let ty =
+      Retyping.get_type_of env evd (EConstr.of_constr term)
+      |> Reductionops.whd_all env evd |> EConstr.Unsafe.to_constr
+    in
+    ref_matches env (fst (Constr.decompose_app ty)) "lean.Bool"
+  with _ -> false
+
+let is_canonical_nat env term =
+  let head, args = Constr.decompose_app term in
+  ref_matches env head "lean.Nat_of_N" && Array.length args = 1
+
+let is_reflected_nat_operation env term =
+  let head, _ = Constr.decompose_app term in
+  List.exists
+    (ref_matches env head)
+    [ "lean.Nat_add"; "lean.Nat_mul"; "lean.Nat_pow"; "lean.Nat_sub" ]
+
+let canonical_nat_value env term =
+  let head, args = Constr.decompose_app term in
+  if ref_matches env head "lean.Nat_of_N" && Array.length args = 1 then
+    z_of_n env args.(0)
+  else None
+
+let first_reifiable_nat env evd depth term =
+  let rec scan env depth path term =
+    let at_current =
+      if
+        Vars.closedn depth term
+        && not (is_canonical_nat env term)
+        && is_nat_type env evd term
+      then
+        match reify_nat ~depth env evd term with
+        | Some certificate
+          when is_reflected_nat_operation env term ->
+          Some (List.rev path, certificate)
+        | _ -> None
+      else None
+    in
+    match at_current with
+    | Some _ as result -> result
+    | None -> (
+      match Constr.kind term with
+      | App _ ->
+        let _, args = Constr.decompose_app term in
+        let rec arguments index =
+          if index = Array.length args then None
+          else
+            match scan env depth (AppArgument index :: path) args.(index) with
+            | Some _ as result -> result
+            | None -> arguments (index + 1)
+        in
+        arguments 0
+      | LetIn (annot, value, ty, body) -> (
+        match scan env depth (LetValue :: path) value with
+        | Some _ as result -> result
+        | None -> (
+          match scan env depth (LetType :: path) ty with
+          | Some _ as result -> result
+          | None ->
+            let body_env =
+              Environ.push_rel (RelDecl.LocalDef (annot, value, ty)) env
+            in
+            scan body_env (depth + 1) (LetBody :: path) body))
+      | Case (_, _, _, _, _, scrutinee, _) ->
+        scan env depth (CaseScrutinee :: path) scrutinee
+      | Proj (_, _, scrutinee) ->
+        scan env depth (ProjectionScrutinee :: path) scrutinee
+      | _ -> None)
+  in
+  scan env depth [] term
+
+let first_compact_nat_discriminator env term =
+  let rec scan path term =
+    match Constr.kind term with
+    | Case (_, _, _, _, _, scrutinee, _) -> (
+      match canonical_nat_value env scrutinee with
+      | Some value -> Some (List.rev (CaseScrutinee :: path), value)
+      | None -> scan (CaseScrutinee :: path) scrutinee)
+    | App _ ->
+      let head, args = Constr.decompose_app term in
+      (match Constr.kind head with
+      | Fix ((recursive_arguments, selected), _) ->
+        let index = recursive_arguments.(selected) in
+        if index >= Array.length args then None
+        else (
+          match canonical_nat_value env args.(index) with
+          | Some value -> Some (List.rev (AppArgument index :: path), value)
+          | None -> scan (AppArgument index :: path) args.(index))
+      | _ -> scan (AppFunction :: path) head)
+    | Proj (_, _, scrutinee) ->
+      scan (ProjectionScrutinee :: path) scrutinee
+    | LetIn (_, value, _, body) -> (
+      match canonical_nat_value env value with
+      | Some compact -> Some (List.rev (LetValue :: path), compact)
+      | None -> scan (LetBody :: path) body)
+    | _ -> None
+  in
+  scan [] term
+
+let rebuild_app head args =
+  if Array.length args = 0 then head else Constr.mkApp (head, args)
+
+let constr_kind_tag term =
+  match Constr.kind term with
+  | Rel _ -> "Rel"
+  | Var _ -> "Var"
+  | Meta _ -> "Meta"
+  | Evar _ -> "Evar"
+  | Sort _ -> "Sort"
+  | Cast _ -> "Cast"
+  | Prod _ -> "Prod"
+  | Lambda _ -> "Lambda"
+  | LetIn _ -> "LetIn"
+  | App _ -> "App"
+  | Const _ -> "Const"
+  | Ind _ -> "Ind"
+  | Construct _ -> "Construct"
+  | Case _ -> "Case"
+  | Fix _ -> "Fix"
+  | CoFix _ -> "CoFix"
+  | Proj _ -> "Proj"
+  | Int _ -> "Int"
+  | Float _ -> "Float"
+  | String _ -> "String"
+  | Array _ -> "Array"
+
+let debug_head_shape term =
+  let rec strip_lets count term =
+    match Constr.kind term with
+    | LetIn (_, _, _, body) -> strip_lets (count + 1) body
+    | _ -> count, term
+  in
+  let lets, body = strip_lets 0 term in
+  let head, args = Constr.decompose_app body in
+  let head =
+    match Constr.kind head with
+    | Const (constant, _) -> "Const " ^ Constant.to_string constant
+    | Rel index -> "Rel " ^ string_of_int index
+    | Fix ((_, selected), (names, _, _)) ->
+      "Fix "
+      ^ Pp.string_of_ppcmds
+          (Name.print (Context.binder_name names.(selected)))
+    | _ -> constr_kind_tag head
+  in
+  Printf.sprintf "lets=%d head=%s args=%d" lets head (Array.length args)
+
+(** One ordinary kernel reduction, selected by normal order.  This function
+    does not decide equality: every returned step is later materialized as a
+    [Bool_defeq] proof and checked by Rocq conversion in isolation. *)
+let rec reduce_definitional_once ?(depth = 0) ?(path = [])
+    ?(before = fun _ _ _ _ -> ()) ?(after = fun _ _ _ _ _ -> ()) env evd
+    term =
+  before env depth path term;
+  let reduced result =
+    after env depth path term result;
+    Some result
+  in
+  match Constr.kind term with
+  | Rel index -> (
+    match Environ.lookup_rel index env with
+    | RelDecl.LocalDef (_, value, _) -> reduced (Vars.lift index value)
+    | RelDecl.LocalAssum _ -> None)
+  | Const (constant, instance) -> (
+    try reduced (Environ.constant_value_in env (constant, instance))
+    with Environ.NotEvaluableConst _ -> None)
+  | LetIn (_, value, _, body) -> reduced (Vars.subst1 value body)
+  | Cast (value, _, _) -> reduced value
+  | App _ ->
+    let head, args = Constr.decompose_app term in
+    (match Constr.kind head with
+    | Lambda (annot, domain, body) when Array.length args > 0 ->
+      let remaining = Array.sub args 1 (Array.length args - 1) in
+      let body = rebuild_app body (Array.map (Vars.lift 1) remaining) in
+      reduced (Constr.mkLetIn (annot, args.(0), domain, body))
+    | LetIn (annot, value, ty, body) ->
+      let body = rebuild_app body (Array.map (Vars.lift 1) args) in
+      reduced (Constr.mkLetIn (annot, value, ty, body))
+    | Const (constant, instance) -> (
+      try
+        reduced
+          (rebuild_app
+             (Environ.constant_value_in env (constant, instance))
+             args)
+      with Environ.NotEvaluableConst _ -> None)
+    | Fix ((recursive_arguments, selected), _) ->
+      let recursive_index = recursive_arguments.(selected) in
+      if recursive_index >= Array.length args then None
+      else (
+        match Constr.kind args.(recursive_index) with
+        | LetIn (annot, value, ty, body) ->
+          let lifted_args = Array.map (Vars.lift 1) args in
+          lifted_args.(recursive_index) <- body;
+          reduced
+            (Constr.mkLetIn
+               ( annot,
+                 value,
+                 ty,
+                 rebuild_app (Vars.lift 1 head) lifted_args ))
+        | _ ->
+        let recursive_head, _ =
+          Constr.decompose_app args.(recursive_index)
+        in
+        (match Constr.kind recursive_head with
+        | Construct _ ->
+          let contracted =
+            match EConstr.kind evd (EConstr.of_constr head) with
+            | Fix efix ->
+              Reductionops.contract_fix evd efix
+              |> EConstr.Unsafe.to_constr
+            | _ -> assert false
+          in
+          reduced (rebuild_app contracted args)
+        | _ ->
+          let reduced_argument =
+            reduce_definitional_once ~depth
+              ~path:(AppArgument recursive_index :: path) ~before ~after env evd
+              args.(recursive_index)
+          in
+          if
+            Option.has_some (Sys.getenv_opt "ROCQ_LEAN_CERT_DEBUG")
+            && not (Option.has_some reduced_argument)
+          then
+            Printf.eprintf
+              "[bool-certificate] stuck recursive argument (%s)\n%!"
+              (debug_head_shape args.(recursive_index));
+          Option.map
+            (fun reduced_argument ->
+              let reduced_args = Array.copy args in
+              reduced_args.(recursive_index) <- reduced_argument;
+              rebuild_app head reduced_args)
+            reduced_argument))
+    | _ -> (
+      match
+        reduce_definitional_once ~depth ~path:(AppFunction :: path) ~before env
+          ~after evd head
+      with
+      | Some reduced_head -> Some (rebuild_app reduced_head args)
+      | None -> None))
+  | Case (info, instance, params, return, invert, scrutinee, branches) -> (
+    match Constr.kind scrutinee with
+    | LetIn (annot, value, ty, body) ->
+      let lifted_case = Vars.lift 1 term in
+      let body_case =
+        replace_certificate_path lifted_case [ CaseScrutinee ] body
+      in
+      reduced (Constr.mkLetIn (annot, value, ty, body_case))
+    | App _ | Construct _ ->
+      let constructor, constructor_args = Constr.decompose_app scrutinee in
+      (match Constr.kind constructor with
+      | Construct ((ind, index), constructor_instance) ->
+        let _, packet = Inductive.lookup_mind_specif env ind in
+        let branch_contexts =
+          Inductive.expand_branch_contexts
+            (Inductive.lookup_mind_specif env ind)
+            constructor_instance params branches
+        in
+        let branch = branches.(index - 1) in
+        let branch_term =
+          Term.it_mkLambda_or_LetIn (snd branch)
+            branch_contexts.(index - 1)
+        in
+        let real_count = Array.length constructor_args - info.ci_npar in
+        if real_count < 0
+           || real_count <> packet.mind_consnrealargs.(index - 1)
+        then None
+        else
+          let real_args =
+            Array.sub constructor_args info.ci_npar real_count
+          in
+          reduced (rebuild_app branch_term real_args)
+      | _ ->
+        Option.map
+          (fun reduced_scrutinee ->
+            Constr.mkCase
+              ( info,
+                instance,
+                params,
+                return,
+                invert,
+                reduced_scrutinee,
+                branches ))
+          (reduce_definitional_once ~depth ~path:(CaseScrutinee :: path)
+             ~before ~after env evd scrutinee))
+    | _ -> (
+    match
+      reduce_definitional_once ~depth ~path:(CaseScrutinee :: path) ~before env
+        ~after evd scrutinee
+    with
+    | Some reduced_scrutinee ->
+      Some
+        (Constr.mkCase
+           ( info,
+             instance,
+             params,
+             return,
+             invert,
+             reduced_scrutinee,
+             branches ))
+    | None -> None))
+  | Proj (projection, relevance, scrutinee) -> (
+    match Constr.kind scrutinee with
+    | LetIn (annot, value, ty, body) ->
+      reduced
+        (Constr.mkLetIn
+           (annot, value, ty, Constr.mkProj (projection, relevance, body)))
+    | _ ->
+    let constructor, constructor_args = Constr.decompose_app scrutinee in
+    (match Constr.kind constructor with
+    | Construct _ ->
+      reduced
+        constructor_args.
+          (Projection.npars projection + Projection.arg projection)
+    | _ -> (
+      match
+        reduce_definitional_once ~depth ~path:(ProjectionScrutinee :: path)
+          ~before ~after env evd scrutinee
+      with
+      | Some reduced_scrutinee ->
+        Some (Constr.mkProj (projection, relevance, reduced_scrutinee))
+      | None ->
+        if Option.has_some (Sys.getenv_opt "ROCQ_LEAN_CERT_DEBUG") then
+          Printf.eprintf
+            "[bool-certificate] stuck projection %s on (%s)\n%!"
+            (Projection.to_string projection)
+            (debug_head_shape scrutinee);
+        None)))
+  | _ -> None
+
+let reify_bool env evd term =
+  let debug = Option.has_some (Sys.getenv_opt "ROCQ_LEAN_CERT_DEBUG") in
+  let validate = Option.has_some (Sys.getenv_opt "ROCQ_LEAN_CERT_VALIDATE") in
+  let steps = ref 0 in
+  let exposures = ref 0 in
+  let primitive env depth term =
+    let head, args = Constr.decompose_app term in
+    let comparison key proof_key operation =
+      if ref_matches env head key && Array.length args = 2 then
+        let () =
+          if debug then
+            Printf.eprintf
+              "[bool-certificate] demanded %s depth=%d left=(%s) right=(%s)\n%!"
+              key depth (debug_head_shape args.(0))
+              (debug_head_shape args.(1))
+        in
+        Option.bind (reify_nat ~depth env evd args.(0)) (fun left ->
+            Option.map
+              (fun right ->
+                let value = operation left.nat_value right.nat_value in
+                {
+                  bool_term =
+                    Constr.mkApp
+                      (head, [| left.nat_term; right.nat_term |]);
+                  bool_value = value;
+                  bool_proof =
+                    cert_app proof_key
+                      [
+                        left.nat_term;
+                        right.nat_term;
+                        n_int left.nat_value;
+                        n_int right.nat_value;
+                        left.nat_proof;
+                        right.nat_proof;
+                      ];
+                })
+              (reify_nat ~depth env evd args.(1)))
+      else None
+    in
+    match comparison "lean.Nat_beq" "lean.NatCertificate_beq" Z.equal with
+    | Some _ as result -> result
+    | None -> (
+      match comparison "lean.Nat_ble" "lean.NatCertificate_ble" Z.leq with
+      | Some _ as result -> result
+      | None -> comparison "lean.Nat_blt" "lean.NatCertificate_blt" Z.lt)
+  in
+  let first_primitive term =
+    let rec scan env depth path term =
+      match primitive env depth term with
+      | Some certificate -> Some (List.rev path, certificate)
+      | None -> (
+        match Constr.kind term with
+        | App _ ->
+          let head, args = Constr.decompose_app term in
+          (match scan env depth (AppFunction :: path) head with
+          | Some _ as result -> result
+          | None ->
+            let rec argument index =
+              if index = Array.length args then None
+              else
+                match
+                  scan env depth (AppArgument index :: path) args.(index)
+                with
+                | Some _ as result -> result
+                | None -> argument (index + 1)
+            in
+            argument 0)
+        | LetIn (annot, value, ty, body) -> (
+          match scan env depth (LetValue :: path) value with
+          | Some _ as result -> result
+          | None -> (
+            match scan env depth (LetType :: path) ty with
+            | Some _ as result -> result
+            | None ->
+              let body_env =
+                Environ.push_rel (RelDecl.LocalDef (annot, value, ty)) env
+              in
+              scan body_env (depth + 1) (LetBody :: path) body))
+        | Case (_, _, _, _, _, scrutinee, _) ->
+          scan env depth (CaseScrutinee :: path) scrutinee
+        | Proj (_, _, scrutinee) ->
+          scan env depth (ProjectionScrutinee :: path) scrutinee
+        | _ -> None)
+    in
+    scan env 0 [] term
+  in
+  let _first_demanded_primitive term =
+    let rec scan env depth path term =
+      match primitive env depth term with
+      | Some certificate -> Some (List.rev path, certificate)
+      | None -> (
+        match Constr.kind term with
+        | App _ ->
+          let head, args = Constr.decompose_app term in
+          (match Constr.kind head with
+          | Fix ((recursive_arguments, selected), _)
+            when recursive_arguments.(selected) < Array.length args ->
+            let index = recursive_arguments.(selected) in
+            scan env depth (AppArgument index :: path) args.(index)
+          | _ -> scan env depth (AppFunction :: path) head)
+        | LetIn (annot, value, ty, body) ->
+          let body_env =
+            Environ.push_rel (RelDecl.LocalDef (annot, value, ty)) env
+          in
+          scan body_env (depth + 1) (LetBody :: path) body
+        | Case (_, _, _, _, _, scrutinee, _) ->
+          scan env depth (CaseScrutinee :: path) scrutinee
+        | Proj (_, _, scrutinee) ->
+          scan env depth (ProjectionScrutinee :: path) scrutinee
+        | _ -> None)
+    in
+    scan env 0 [] term
+  in
+  let rec constructor_certificate_under_lets env term =
+    match Constr.kind term with
+    | LetIn (annot, value, ty, body) ->
+      let body_env =
+        Environ.push_rel (RelDecl.LocalDef (annot, value, ty)) env
+      in
+      constructor_certificate_under_lets body_env body
+    | _ ->
+      Option.map
+        (fun value ->
+          {
+            bool_term = term;
+            bool_value = value;
+            bool_proof =
+              cert_app "lean.BoolCertificate_of_bool" [ coq_bool value ];
+          })
+        (bool_constructor_value env term)
+  in
+  let checked_rewrite label term =
+    try
+      ignore (Typing.type_of env evd (EConstr.of_constr term));
+      true
+    with _ ->
+      if debug then
+        Printf.eprintf "[bool-certificate] rejected ill-typed %s rewrite\n%!"
+          label;
+      false
+  in
+  let equality_type local_env left right =
+    let _ = local_env in
+    Constr.mkApp
+      ( registered_ref_at_level "lean.Eq" Level.set,
+        [| registered_ref "lean.Bool"; left; right |] )
+  in
+  let shared_bool_contexts = ref [] in
+  let shared_bool_states = ref [] in
+  let last_shared_bool_state = ref None in
+  let dependent_rewrite = ref false in
+  let refresh_local_env local_env =
+    let global_env = Global.env () in
+    let global_levels = UGraph.domain (Environ.universes global_env) in
+    let local_graph = Environ.universes local_env in
+    let local_levels =
+      Level.Set.diff (UGraph.domain local_graph) global_levels
+    in
+    let constraints =
+      UGraph.constraints_of_universes local_graph
+      |> fst
+      |> UnivConstraints.filter (fun (lower, _, upper) ->
+           Level.Set.mem lower local_levels
+           || Level.Set.mem upper local_levels)
+    in
+    Environ.push_context_set ~strict:false (local_levels, constraints)
+      global_env
+    |> Environ.push_rel_context (Environ.rel_context local_env)
+  in
+  let local_arguments local_env =
+    let context = Environ.rel_context local_env in
+    context
+    |> List.mapi (fun index declaration -> index + 1, declaration)
+    |> List.filter_map (fun (index, declaration) ->
+         match declaration with
+         | RelDecl.LocalAssum _ -> Some (Constr.mkRel index)
+         | RelDecl.LocalDef _ -> None)
+    |> List.rev |> Array.of_list
+  in
+  let local_universe_entry local_env =
+    let global_levels = UGraph.domain (Global.universes ()) in
+    let local_levels =
+      Level.Set.diff
+        (UGraph.domain (Environ.universes local_env))
+        global_levels
+    in
+    if Level.Set.is_empty local_levels then
+      ( ( UState.Monomorphic_entry Univ.ContextSet.empty,
+          UnivNames.empty_binders ),
+        UVars.Instance.empty )
+    else
+      let levels = Level.Set.elements local_levels |> Array.of_list in
+      let instance = UVars.Instance.of_array ([||], levels) in
+      let constraints =
+        UGraph.constraints_of_universes
+          (Environ.universes local_env)
+        |> fst
+        |> UnivConstraints.filter (fun (lower, _, upper) ->
+             Level.Set.mem lower local_levels
+             || Level.Set.mem upper local_levels)
+        |> PConstraints.of_univs
+      in
+      let names =
+        {
+          quals = [||];
+          univs =
+            Array.map
+              (fun level ->
+                Name (Id.of_string_soft (Level.to_string level)))
+              levels;
+        }
+      in
+      let context = UVars.UContext.make names (instance, constraints) in
+      ( ( UState.Polymorphic_entry context,
+          UnivNames.empty_binders ),
+        instance )
+  in
+  let share_transparent_definition ?types base local_env body =
+    let context = Environ.rel_context local_env in
+    let body_type =
+      match types with
+      | Some types -> types
+      | None ->
+        Retyping.get_type_of local_env evd (EConstr.of_constr body)
+        |> EConstr.Unsafe.to_constr
+    in
+    let closed_body = Term.it_mkLambda_or_LetIn body context in
+    let closed_type = Term.it_mkProd_or_LetIn body_type context in
+    let name =
+      Namegen.next_global_ident_away (Global.safe_env ())
+        (Id.of_string base) Id.Set.empty
+    in
+    let univs, instance = local_universe_entry local_env in
+    let constant =
+      match
+        quickdef ~name ~types:(Some closed_type) ~univs closed_body
+      with
+      | GlobRef.ConstRef constant -> constant
+      | _ -> assert false
+    in
+    if String.equal base "_lean_import_bool_context" then
+      shared_bool_contexts := constant :: !shared_bool_contexts;
+    let arguments = local_arguments local_env in
+    Constr.mkApp
+      (Constr.mkConstU (constant, instance), arguments)
+  in
+  let share_opaque_proof base local_env types proof =
+    let context = Environ.rel_context local_env in
+    let closed_type = Term.it_mkProd_or_LetIn types context in
+    let closed_proof = Term.it_mkLambda_or_LetIn proof context in
+    let name =
+      Namegen.next_global_ident_away (Global.safe_env ())
+        (Id.of_string base) Id.Set.empty
+    in
+    let univs, instance = local_universe_entry local_env in
+    let entry =
+      Declare.definition_entry ~opaque:true ~types:closed_type ~univs
+        closed_proof
+    in
+    let scope = Locality.(Global ImportDefaultBehavior) in
+    let constant =
+      match
+        Declare.declare_entry ~name ~scope ~kind:Decls.(IsProof Lemma)
+          ~impargs:[] ~uctx:UState.empty entry
+      with
+      | GlobRef.ConstRef constant -> constant
+      | _ -> assert false
+    in
+    Constr.mkApp
+      ( Constr.mkConstU (constant, instance),
+        local_arguments local_env )
+  in
+  let rec prune_dead_leading_lets term =
+    match Constr.kind term with
+    | LetIn (annot, value, ty, body) ->
+      let body = prune_dead_leading_lets body in
+      if Vars.noccurn 1 body then Vars.subst1 value body
+      else Constr.mkLetIn (annot, value, ty, body)
+    | _ -> term
+  in
+  let rec _contextual_definitional_equality local_env original reduced path =
+    let local_env = refresh_local_env local_env in
+    match path, Constr.kind original, Constr.kind reduced with
+    | LetBody :: rest,
+      LetIn (annot, value, ty, original_body),
+      LetIn (_, reduced_value, reduced_ty, reduced_body)
+      when value == reduced_value && ty == reduced_ty ->
+      let body_env =
+        Environ.push_rel (RelDecl.LocalDef (annot, value, ty)) local_env
+      in
+      Option.map
+        (fun body_equality ->
+          {
+            bool_equality_left =
+              Constr.mkLetIn
+                (annot, value, ty, body_equality.bool_equality_left);
+            bool_equality_right =
+              Constr.mkLetIn
+                (annot, value, ty, body_equality.bool_equality_right);
+            bool_equality_resume =
+              Constr.mkLetIn
+                (annot, value, ty, body_equality.bool_equality_resume);
+            bool_equality_proof =
+              Constr.mkLetIn
+                (annot, value, ty, body_equality.bool_equality_proof);
+          })
+        (_contextual_definitional_equality body_env original_body reduced_body
+           rest)
+    | _ ->
+      let rec choose path =
+        let try_path () =
+          try
+            let redex = subterm_at_certificate_path original path in
+            let contractum = subterm_at_certificate_path reduced path in
+            if debug && !steps >= 129 then
+              Printf.eprintf
+                "[bool-certificate] candidate boundary step=%d depth=%d redex=(%s) contractum=(%s)\n%!"
+                !steps (List.length path) (debug_head_shape redex)
+                (debug_head_shape contractum);
+            match atomic_type_level local_env evd redex with
+            | None -> None
+            | Some level ->
+              let domain =
+                Retyping.get_type_of local_env evd (EConstr.of_constr redex)
+                |> EConstr.Unsafe.to_constr
+              in
+              let contractum_domain =
+                Retyping.get_type_of local_env evd
+                  (EConstr.of_constr contractum)
+                |> EConstr.Unsafe.to_constr
+              in
+              if not (Constr.equal domain contractum_domain) then (
+                let left_head = fst (Constr.decompose_app domain) in
+                let right_head =
+                  fst (Constr.decompose_app contractum_domain)
+                in
+                let incompatible =
+                  match Constr.kind left_head, Constr.kind right_head with
+                  | Const (left, _), Const (right, _) ->
+                    not (Environ.QConstant.equal local_env left right)
+                  | Ind (left, _), Ind (right, _) ->
+                    not (Environ.QInd.equal local_env left right)
+                  | Sort left, Sort right -> not (Sorts.equal left right)
+                  | _ -> false
+                in
+                if incompatible then (
+                  if debug then
+                    Printf.eprintf
+                      "[bool-certificate] incompatible boundary depth=%d left=(%s) right=(%s)\n%!"
+                      (List.length path) (debug_head_shape domain)
+                      (debug_head_shape contractum_domain);
+                  raise Not_found));
+              let context_body =
+                replace_certificate_path (Vars.lift 1 original) path
+                  (Constr.mkRel 1)
+              in
+              let context =
+                Constr.mkLambda
+                  ( Context.make_annot Anonymous Sorts.Relevant,
+                    domain,
+                    context_body )
+              in
+              let context =
+                share_transparent_definition "_lean_import_bool_context"
+                  local_env context
+              in
+              let refl =
+                Constr.mkApp
+                  ( registered_ref_at_level "lean.definitional_eq" level,
+                    [| domain; contractum |] )
+              in
+              let refl_type =
+                Retyping.get_type_of local_env evd (EConstr.of_constr refl)
+                |> EConstr.Unsafe.to_constr
+              in
+              let equality, arguments = Constr.decompose_app refl_type in
+              if Array.length arguments <> 3 then
+                CErrors.anomaly Pp.(str "Unexpected equality shape");
+              let arguments = Array.copy arguments in
+              arguments.(1) <- redex;
+              let local_equality =
+                Constr.mkCast
+                  ( refl,
+                    Constr.DEFAULTcast,
+                    Constr.mkApp (equality, arguments) )
+              in
+              let proof =
+                Constr.mkApp
+                  ( registered_ref_at_level
+                      "lean.BoolEquality_replace_def" level,
+                    [| domain; context; redex; contractum; local_equality |] )
+              in
+              let left = Constr.mkApp (context, [| redex |]) in
+              let right = Constr.mkApp (context, [| contractum |]) in
+              let resume = Vars.subst1 contractum context_body in
+              if debug && !steps >= 132 then
+                Printf.eprintf
+                  "[bool-certificate] definitional boundary step=%d depth=%d redex=(%s) contractum=(%s) type=(%s)\n%!"
+                  !steps (List.length path) (debug_head_shape redex)
+                  (debug_head_shape contractum) (debug_head_shape domain);
+              Some
+                {
+                  bool_equality_left = left;
+                  bool_equality_right = right;
+                  bool_equality_resume = resume;
+                  bool_equality_proof = proof;
+                }
+          with _ -> None
+        in
+        match try_path () with
+        | Some _ as equality -> equality
+        | None -> (
+          match List.rev path with
+          | [] -> None
+          | _ :: parent ->
+            if debug then
+              Printf.eprintf
+                "[bool-certificate] widening dependent context to depth=%d\n%!"
+                (List.length parent);
+            choose (List.rev parent))
+      in
+      choose path
+  in
+  let homogeneous_equality_type local_env domain left right =
+    let level =
+      match atomic_type_level local_env evd right with
+      | Some level -> level
+      | None -> raise Not_found
+    in
+    let refl =
+      Constr.mkApp
+        ( registered_ref_at_level "lean.definitional_eq" level,
+          [| domain; right |] )
+    in
+    let refl_type =
+      Retyping.get_type_of local_env evd (EConstr.of_constr refl)
+      |> EConstr.Unsafe.to_constr
+    in
+    let equality, arguments = Constr.decompose_app refl_type in
+    if Array.length arguments <> 3 then
+      CErrors.anomaly Pp.(str "Unexpected equality shape");
+    let arguments = Array.copy arguments in
+    arguments.(1) <- left;
+    Constr.mkApp (equality, arguments)
+  in
+  let rec local_definitional_equality local_env original reduced path =
+    let local_env = refresh_local_env local_env in
+    match path, Constr.kind original, Constr.kind reduced with
+    | LetBody :: rest,
+      LetIn (annot, value, ty, original_body),
+      LetIn (_, reduced_value, reduced_ty, reduced_body)
+      when value == reduced_value && ty == reduced_ty ->
+      let body_env =
+        Environ.push_rel (RelDecl.LocalDef (annot, value, ty)) local_env
+      in
+      local_definitional_equality body_env original_body reduced_body rest
+    | _ ->
+      try
+        let redex = subterm_at_certificate_path original path in
+        let contractum = subterm_at_certificate_path reduced path in
+        let domain =
+          Retyping.get_type_of local_env evd (EConstr.of_constr contractum)
+          |> EConstr.Unsafe.to_constr
+        in
+        let level =
+          match atomic_type_level local_env evd contractum with
+          | Some level -> level
+          | None -> raise Not_found
+        in
+        let reflexivity =
+          Constr.mkApp
+            ( registered_ref_at_level "lean.definitional_eq" level,
+              [| domain; contractum |] )
+        in
+        let equality =
+          homogeneous_equality_type local_env domain redex contractum
+        in
+        Some (Constr.mkCast (reflexivity, Constr.DEFAULTcast, equality))
+      with _ -> None
+  in
+  let typed_context_equality local_env equality term hole_path =
+    let local_env = refresh_local_env local_env in
+    let stage = ref "read equality" in
+    try
+      let equality_ty =
+        Retyping.get_type_of local_env evd (EConstr.of_constr equality)
+        |> EConstr.Unsafe.to_constr
+      in
+      let _, arguments = Constr.decompose_app equality_ty in
+      if Array.length arguments <> 3 then raise Not_found;
+      let domain = arguments.(0) in
+      let redex = arguments.(1) in
+      let contractum = arguments.(2) in
+      stage := "match redex";
+      if
+        not
+          (Constr.equal (subterm_at_certificate_path term hole_path) redex)
+      then raise Not_found;
+      stage := "type endpoints";
+      let rewritten = replace_certificate_path term hole_path contractum in
+      let codomain =
+        Retyping.get_type_of local_env evd (EConstr.of_constr term)
+        |> EConstr.Unsafe.to_constr
+      in
+      let rewritten_type =
+        Retyping.get_type_of local_env evd (EConstr.of_constr rewritten)
+        |> EConstr.Unsafe.to_constr
+      in
+      stage := "compare endpoint types";
+      if not (Constr.equal codomain rewritten_type) then raise Not_found;
+      stage := "read universe levels";
+      let domain_level =
+        match atomic_type_level local_env evd redex with
+        | Some level -> level
+        | None -> raise Not_found
+      in
+      let codomain_level =
+        match atomic_type_level local_env evd term with
+        | Some level -> level
+        | None -> raise Not_found
+      in
+      let context_body =
+        replace_certificate_path (Vars.lift 1 term) hole_path
+          (Constr.mkRel 1)
+      in
+      let context =
+        Constr.mkLambda
+          ( Context.make_annot Anonymous Sorts.Relevant,
+            domain,
+            context_body )
+      in
+      stage := "build congruence proof";
+      let proof =
+        Constr.mkApp
+          ( registered_ref_at_levels "lean.Equality_replace_def"
+              [ domain_level; codomain_level ],
+            [|
+              domain;
+              codomain;
+              context;
+              redex;
+              contractum;
+              equality;
+            |] )
+      in
+      let proof =
+        Constr.mkCast
+          ( proof,
+            Constr.DEFAULTcast,
+            homogeneous_equality_type local_env codomain term rewritten )
+      in
+      stage := "check congruence proof";
+      ignore (Typing.type_of local_env evd (EConstr.of_constr proof));
+      Some (rewritten, proof)
+    with exn ->
+      if debug then
+        Printf.eprintf
+          "[bool-certificate] typed boundary rejected path=%d stage=%s (%s)\n%!"
+          (List.length hole_path) !stage (Printexc.to_string exn);
+      None
+  in
+  let dependent_app2_hequality local_env equality term hole_path =
+    let local_env = refresh_local_env local_env in
+    let evd = Evd.from_env local_env in
+    let stage = ref "match application frame" in
+    try
+      let head, application_args = Constr.decompose_app term in
+      if
+        hole_path <> [ AppArgument 0 ]
+        || Array.length application_args <> 2
+      then raise Not_found;
+      let equality_ty =
+        Retyping.get_type_of local_env evd (EConstr.of_constr equality)
+        |> EConstr.Unsafe.to_constr
+      in
+      let _, equality_args = Constr.decompose_app equality_ty in
+      if Array.length equality_args <> 3 then raise Not_found;
+      let domain = equality_args.(0) in
+      let redex = equality_args.(1) in
+      let contractum = equality_args.(2) in
+      if not (Constr.equal application_args.(0) redex) then raise Not_found;
+      stage := "read dependent function telescope";
+      let head_type =
+        Retyping.get_type_of local_env evd (EConstr.of_constr head)
+        |> Reductionops.whd_betaiotazeta local_env evd
+        |> EConstr.Unsafe.to_constr
+      in
+      if debug then
+        Printf.eprintf
+          "[bool-certificate] dependent application head type=(%s)\n%!"
+          (debug_head_shape head_type);
+      stage := "read first function domain";
+      let first_annot, first_domain, tail = Constr.destProd head_type in
+      stage := "read second function domain";
+      let tail_env =
+        Environ.push_rel
+          (RelDecl.LocalAssum (first_annot, first_domain))
+          local_env
+      in
+      let tail =
+        Reductionops.whd_betaiotazeta tail_env (Evd.from_env tail_env)
+          (EConstr.of_constr tail)
+        |> EConstr.Unsafe.to_constr
+      in
+      let second_annot, second_domain, result_type =
+        Constr.destProd tail
+      in
+      let second_family =
+        Constr.mkLambda (first_annot, first_domain, second_domain)
+      in
+      let result_family =
+        Constr.mkLambda
+          ( first_annot,
+            first_domain,
+            Constr.mkLambda (second_annot, second_domain, result_type) )
+      in
+      stage := "read application universes";
+      let domain_level =
+        match atomic_type_level local_env evd redex with
+        | Some level -> level
+        | None -> raise Not_found
+      in
+      let second_level =
+        match atomic_type_level local_env evd application_args.(1) with
+        | Some level -> level
+        | None -> raise Not_found
+      in
+      let result_level =
+        match atomic_type_level local_env evd term with
+        | Some level -> level
+        | None -> raise Not_found
+      in
+      stage := "build dependent argument transport";
+      let transported_argument =
+        Constr.mkApp
+          ( registered_ref_at_levels "lean.Equality_transport"
+              [ domain_level; second_level ],
+            [|
+              domain;
+              second_family;
+              redex;
+              contractum;
+              equality;
+              application_args.(1);
+            |] )
+      in
+      let transported_right =
+        Constr.mkApp (head, [| contractum; transported_argument |])
+      in
+      let right =
+        Constr.mkApp
+          (head, [| contractum; application_args.(1) |])
+      in
+      stage := "build dependent application congruence";
+      let proof =
+        Constr.mkApp
+          ( registered_ref_at_levels "lean.HEquality_app2_replace_def"
+              [ domain_level; second_level; result_level ],
+            [|
+              domain;
+              second_family;
+              result_family;
+              head;
+              redex;
+              contractum;
+              equality;
+              application_args.(1);
+            |] )
+      in
+      if debug then
+        Printf.eprintf
+          "[bool-certificate] dependent application frame transported (%s -> %s)\n%!"
+          (debug_head_shape transported_right) (debug_head_shape right);
+      dependent_rewrite := true;
+      Some (term, right, proof)
+    with exn ->
+      if debug then
+        Printf.eprintf
+          "[bool-certificate] dependent application rejected stage=%s (%s)\n%!"
+          !stage (Printexc.to_string exn);
+      None
+  in
+  let dependent_context_hequality local_env equality term hole_path =
+    let local_env = refresh_local_env local_env in
+    let stage = ref "read equality" in
+    let progress next =
+      stage := next;
+      if debug then
+        Printf.eprintf "[bool-certificate] dependent boundary: %s\n%!" next
+    in
+    try
+      let equality_ty =
+        Retyping.get_type_of local_env evd (EConstr.of_constr equality)
+        |> EConstr.Unsafe.to_constr
+      in
+      let _, arguments = Constr.decompose_app equality_ty in
+      if Array.length arguments <> 3 then raise Not_found;
+      let domain = arguments.(0) in
+      let redex = arguments.(1) in
+      let contractum = arguments.(2) in
+      progress "match redex";
+      if
+        not
+          (Constr.equal (subterm_at_certificate_path term hole_path) redex)
+      then raise Not_found;
+      progress "read domain universe";
+      let domain_level =
+        match atomic_type_level local_env evd redex with
+        | Some level -> level
+        | None -> raise Not_found
+      in
+      progress "read codomain universe";
+      let codomain_level =
+        match atomic_type_level local_env evd term with
+        | Some level -> level
+        | None -> raise Not_found
+      in
+      progress "build dependent context";
+      let annot = Context.make_annot Anonymous Sorts.Relevant in
+      let context_body =
+        replace_certificate_path (Vars.lift 1 term) hole_path
+          (Constr.mkRel 1)
+      in
+      progress "infer dependent family";
+      let term_type =
+        Retyping.get_type_of local_env evd (EConstr.of_constr term)
+        |> EConstr.Unsafe.to_constr
+      in
+      let lifted_redex = Vars.lift 1 redex in
+      let rec abstract_redex binders candidate =
+        if Constr.equal candidate (Vars.lift binders lifted_redex) then
+          Constr.mkRel (binders + 1)
+        else
+          Constr.map_with_binders
+            (fun binders -> binders + 1)
+            abstract_redex binders candidate
+      in
+      let family_body =
+        abstract_redex 0 (Vars.lift 1 term_type)
+      in
+      let family = Constr.mkLambda (annot, domain, family_body) in
+      let context = Constr.mkLambda (annot, domain, context_body) in
+      let left = Constr.mkApp (context, [| redex |]) in
+      let right = Constr.mkApp (context, [| contractum |]) in
+      let left_type = Constr.mkApp (family, [| redex |]) in
+      let right_type = Constr.mkApp (family, [| contractum |]) in
+      progress "build heterogeneous proof";
+      let proof =
+        Constr.mkApp
+          ( registered_ref_at_levels "lean.HEquality_replace_def"
+              [ domain_level; codomain_level ],
+            [|
+              domain;
+              family;
+              context;
+              redex;
+              contractum;
+              equality;
+            |] )
+      in
+      let proof_type =
+        Constr.mkApp
+          ( registered_ref_at_level "lean.HEquality" codomain_level,
+            [| left_type; left; right_type; right |] )
+      in
+      progress "check heterogeneous proof";
+      let proof =
+        share_opaque_proof "_lean_import_dependent_hequality" local_env
+          proof_type proof
+      in
+      progress "checked heterogeneous proof";
+      Some (left, right, proof)
+    with exn ->
+      if debug then
+        Printf.eprintf
+          "[bool-certificate] dependent boundary rejected path=%d stage=%s (%s)\n%!"
+          (List.length hole_path) !stage (Printexc.to_string exn);
+      None
+  in
+  let hequality_to_equality ?(normalize = false) local_env left right proof =
+    let local_env = refresh_local_env local_env in
+    let evd = Evd.from_env local_env in
+    let stage = ref "read endpoint types" in
+    try
+      let left_domain =
+        Retyping.get_type_of local_env evd (EConstr.of_constr left)
+        |> EConstr.Unsafe.to_constr
+      in
+      let right_domain =
+        Retyping.get_type_of local_env evd (EConstr.of_constr right)
+        |> EConstr.Unsafe.to_constr
+      in
+      let domain =
+        if Constr.equal left_domain right_domain then left_domain
+        else if normalize then
+          let () =
+            stage := "normalize left endpoint type";
+            if debug then
+              Printf.eprintf "[bool-certificate] closing heterogeneous proof: %s\n%!"
+                !stage
+          in
+          let left_domain =
+            Reductionops.whd_betaiotazeta local_env evd
+              (EConstr.of_constr left_domain)
+            |> EConstr.Unsafe.to_constr
+          in
+          let () =
+            stage := "normalize right endpoint type";
+            if debug then
+              Printf.eprintf "[bool-certificate] closing heterogeneous proof: %s\n%!"
+                !stage
+          in
+          let right_domain =
+            Reductionops.whd_betaiotazeta local_env evd
+              (EConstr.of_constr right_domain)
+            |> EConstr.Unsafe.to_constr
+          in
+          if Constr.equal left_domain right_domain then left_domain
+          else raise Not_found
+        else raise Not_found
+      in
+      stage := "read endpoint universe";
+      let level =
+        match atomic_type_level local_env evd left with
+        | Some level -> level
+        | None -> raise Not_found
+      in
+      stage := "build equality bridge";
+      let equality =
+        Constr.mkApp
+          ( registered_ref_at_level "lean.HEquality_to_equality" level,
+            [| domain; left; right; proof |] )
+      in
+      stage := "defer equality bridge check";
+      if debug && normalize then
+        Printf.eprintf "[bool-certificate] closing heterogeneous proof: %s\n%!"
+          !stage;
+      if debug && normalize then
+        Printf.eprintf
+          "[bool-certificate] built heterogeneous equality bridge\n%!";
+      Some equality
+    with exn ->
+      if debug && normalize then
+        Printf.eprintf
+          "[bool-certificate] heterogeneous close rejected stage=%s (%s)\n%!"
+          !stage (Printexc.to_string exn);
+      None
+  in
+  let rec typed_localized_bool_rewrite local_env equality term path =
+    match path, Constr.kind term with
+    | LetBody :: rest, LetIn (annot, value, ty, body) ->
+      let body_env =
+        Environ.push_rel (RelDecl.LocalDef (annot, value, ty)) local_env
+      in
+      Option.map
+        (fun (left_body, right_body, proof, homogeneous) ->
+          let left = Constr.mkLetIn (annot, value, ty, left_body) in
+          let right = Constr.mkLetIn (annot, value, ty, right_body) in
+          let proof = Constr.mkLetIn (annot, value, ty, proof) in
+          if homogeneous then left, right, proof, true
+          else
+            match hequality_to_equality local_env left right proof with
+            | Some equality ->
+              if debug then
+                Printf.eprintf
+                  "[bool-certificate] heterogeneous proof became homogeneous\n%!";
+              left, right, equality, true
+            | None -> left, right, proof, false)
+        (typed_localized_bool_rewrite body_env equality body rest)
+    | _ ->
+      let full_path = path in
+      let direct_equality () =
+        if full_path <> [] then None
+        else
+          try
+            let equality_ty =
+              Retyping.get_type_of local_env evd
+                (EConstr.of_constr equality)
+              |> EConstr.Unsafe.to_constr
+            in
+            let _, arguments = Constr.decompose_app equality_ty in
+            if Array.length arguments <> 3 then raise Not_found;
+            if not (Constr.equal term arguments.(1)) then raise Not_found;
+            Some (arguments.(1), arguments.(2), equality, true)
+          with _ -> None
+      in
+      match direct_equality () with
+      | Some _ as result -> result
+      | None ->
+      let rec find_boundary path =
+        let ancestor = subterm_at_certificate_path term path in
+        let hole_path = CList.skipn (List.length path) full_path in
+        let lifted =
+          match
+            dependent_app2_hequality local_env equality ancestor hole_path
+          with
+          | Some (left, right, heterogeneous) ->
+            Option.map
+              (fun proof -> right, proof)
+              (hequality_to_equality ~normalize:true local_env left right
+                 heterogeneous)
+          | None ->
+            typed_context_equality local_env equality ancestor hole_path
+        in
+        match lifted with
+        | Some (rewritten, proof) ->
+          if debug then
+            Printf.eprintf
+              "[bool-certificate] typed boundary accepted depth=%d hole=%d\n%!"
+              (List.length path) (List.length hole_path);
+          Some (path, ancestor, rewritten, proof)
+        | None -> (
+          match List.rev path with
+          | [] -> None
+          | _ :: parent -> find_boundary (List.rev parent))
+      in
+      let initial_path =
+        match List.rev full_path with
+        | [] -> []
+        | _ :: parent -> List.rev parent
+      in
+      (match find_boundary initial_path with
+      | None ->
+        let heterogeneous =
+          match
+            dependent_app2_hequality local_env equality term full_path
+          with
+          | Some _ as result -> result
+          | None ->
+            dependent_context_hequality local_env equality term full_path
+        in
+        Option.map
+          (fun (left, right, proof) -> left, right, proof, false)
+          heterogeneous
+      | Some (boundary, _, right, proof) ->
+          let rec lift boundary right proof =
+            match boundary with
+            | [] -> Some (term, right, proof, true)
+            | _ ->
+              let find_parent candidate =
+                let parent_term =
+                  subterm_at_certificate_path term candidate
+                in
+                let hole_path =
+                  CList.skipn (List.length candidate) boundary
+                in
+                let lifted =
+                  match
+                    dependent_app2_hequality local_env proof parent_term
+                      hole_path
+                  with
+                  | Some (left, right, heterogeneous) ->
+                    Option.map
+                      (fun equality -> right, equality)
+                      (hequality_to_equality ~normalize:true local_env left
+                         right heterogeneous)
+                  | None ->
+                    typed_context_equality local_env proof parent_term
+                      hole_path
+                in
+                match lifted with
+                | Some (rewritten_parent, parent_proof) ->
+                  if debug then
+                    Printf.eprintf
+                      "[bool-certificate] typed boundary lifted depth=%d hole=%d\n%!"
+                      (List.length candidate) (List.length hole_path);
+                  Some (candidate, rewritten_parent, parent_proof)
+                | None ->
+                  Option.bind
+                    (dependent_context_hequality local_env proof parent_term
+                       hole_path)
+                    (fun (left, right, heterogeneous) ->
+                      Option.map
+                        (fun equality -> candidate, right, equality)
+                        (hequality_to_equality ~normalize:true local_env left
+                           right heterogeneous))
+              in
+              let first_parent =
+                match List.rev boundary with
+                | [] -> []
+                | _ :: parent -> List.rev parent
+              in
+              (match find_parent first_parent with
+              | Some (parent, rewritten_parent, parent_proof) ->
+                lift parent rewritten_parent parent_proof
+              | None ->
+                Option.map
+                  (fun (left, right, proof) ->
+                    left, right, proof, false)
+                  (dependent_context_hequality local_env proof term boundary))
+          in
+          lift boundary right proof)
+  in
+  let localized_bool_rewrite local_env equality term path =
+    dependent_rewrite := false;
+    Option.bind
+      (typed_localized_bool_rewrite local_env equality term path)
+      (fun (left, right, proof, homogeneous) ->
+        if homogeneous then Some (left, right, proof)
+        else
+          Option.map
+            (fun equality -> left, right, equality)
+            (hequality_to_equality ~normalize:true local_env left right
+               proof))
+  in
+  let share_bool_equality left right proof =
+    Gc.full_major ();
+    Gc.compact ();
+    let bool = registered_ref "lean.Bool" in
+    let share_state term =
+      let head, _ = Constr.decompose_app term in
+      let already_shared =
+        match Constr.kind head with
+        | Const (constant, _) ->
+          List.exists
+            (fun shared -> Environ.QConstant.equal env constant shared)
+            !shared_bool_states
+        | _ -> false
+      in
+      if already_shared then term
+      else
+        match !last_shared_bool_state with
+        | Some (known, shared) when Constr.equal known term -> shared
+        | _ ->
+        let shared =
+          share_transparent_definition ~types:bool
+            "_lean_import_bool_state" env term
+        in
+        let head, _ = Constr.decompose_app shared in
+        (match Constr.kind head with
+        | Const (constant, _) ->
+          shared_bool_states := constant :: !shared_bool_states
+        | _ -> assert false);
+        last_shared_bool_state := Some (term, shared);
+        shared
+    in
+    let shared_left = share_state left in
+    let shared_right = share_state right in
+    let shared_type = equality_type env shared_left shared_right in
+    let proof = Constr.mkCast (proof, Constr.DEFAULTcast, shared_type) in
+    let base = Id.of_string "_lean_import_bool_equality" in
+    let name =
+      Namegen.next_global_ident_away (Global.safe_env ()) base Id.Set.empty
+    in
+    let context = Environ.rel_context env in
+    let types = Term.it_mkProd_or_LetIn shared_type context in
+    let proof = Term.it_mkLambda_or_LetIn proof context in
+    let univs, instance = local_universe_entry env in
+    let entry =
+      Declare.definition_entry ~opaque:true ~types ~univs proof
+    in
+    if debug then
+      Printf.eprintf "[bool-certificate] checking equality checkpoint %s\n%!"
+        (Id.to_string name);
+    let constant =
+      let scope = Locality.(Global ImportDefaultBehavior) in
+      match
+        Declare.declare_entry ~name ~scope ~kind:Decls.(IsProof Lemma)
+          ~impargs:[] ~uctx:UState.empty entry
+      with
+      | GlobRef.ConstRef constant -> constant
+      | _ -> assert false
+    in
+    if debug then
+      Printf.eprintf "[bool-certificate] checked equality checkpoint %s\n%!"
+        (Id.to_string name);
+    ( shared_left,
+      shared_right,
+      Constr.mkApp
+        ( Constr.mkConstU (constant, instance),
+          local_arguments env ) )
+  in
+  let finish_and_share certificate_origin reduction_origin reductions term
+      result =
+    if debug then
+      Printf.eprintf
+        "[bool-certificate] finish reductions=%d origin=(%s) reduction=(%s) term=(%s)\n%!"
+        (List.length reductions) (debug_head_shape certificate_origin)
+        (debug_head_shape reduction_origin) (debug_head_shape term);
+    let _ = reduction_origin, reductions in
+    let result =
+      if Constr.equal certificate_origin term then result
+      else
+        {
+          bool_term = certificate_origin;
+          bool_value = result.bool_value;
+          bool_proof =
+            cert_app "lean.BoolCertificate_of_eq"
+              [
+                certificate_origin;
+                term;
+                coq_bool result.bool_value;
+                cert_app "lean.Bool_defeq" [ certificate_origin ];
+                result.bool_proof;
+              ];
+        }
+    in
+    Some (share_bool_certificate result)
+  in
+  let rec reify fuel certificate_origin reduction_origin segment_length
+      step_equalities term =
+    incr steps;
+    if debug && (!steps mod 100 = 0 || !steps < 20) then
+      Printf.eprintf "[bool-certificate] step=%d fuel=%d\n%!" !steps fuel;
+    if fuel = 0 then None
+    else
+      match constructor_certificate_under_lets env term with
+      | Some result ->
+        finish_and_share certificate_origin reduction_origin step_equalities
+          result.bool_term result
+      | None -> (
+        match primitive env 0 term with
+        | Some result ->
+          finish_and_share certificate_origin reduction_origin step_equalities
+            term result
+        | None ->
+          let continue_reduction _path unpruned =
+            let reduced = prune_dead_leading_lets unpruned in
+            let valid =
+              if not validate then true
+              else
+                try
+                  ignore (Typing.type_of env evd (EConstr.of_constr reduced));
+                  true
+                with _ -> false
+            in
+            if not valid then (
+              Printf.eprintf
+                "[bool-certificate] invalid reduction step=%d %s -> %s\n%!"
+                !steps (constr_kind_tag term) (constr_kind_tag reduced);
+              None)
+            else
+              let checkpoint () =
+                Option.bind
+                  (reify (fuel - 1) reduced reduced 0 [] reduced)
+                  (fun result ->
+                    finish_and_share certificate_origin reduction_origin
+                      step_equalities reduced result)
+              in
+              if not (Constr.equal unpruned reduced) || segment_length >= 7
+              then checkpoint ()
+              else
+                reify (fuel - 1) certificate_origin reduction_origin
+                  (segment_length + 1) step_equalities reduced
+          in
+          let rewrite_compact path value =
+            incr exposures;
+            if debug && (!exposures < 20 || !exposures mod 100 = 0) then
+              Printf.eprintf
+                "[bool-certificate] expose=%d nat=%s depth=%d (%s)\n%!"
+                !exposures (Z.to_string value) (List.length path)
+                (debug_head_shape term);
+            let original = subterm_at_certificate_path term path in
+            let value_term = n_int value in
+            let original_proof =
+              cert_app "lean.NatCertificate_of_N" [ value_term ]
+            in
+            let replacement, replacement_proof =
+              if Z.equal value Z.zero then
+                ( lean_nat_constructor 1,
+                  registered_ref "lean.NatCertificate_zero" )
+              else
+                let predecessor = Z.pred value in
+                let predecessor_term =
+                  cert_app "lean.Nat_of_N" [ n_int predecessor ]
+                in
+                ( Constr.mkApp
+                    (lean_nat_constructor 2, [| predecessor_term |]),
+                  cert_app "lean.NatCertificate_succ"
+                    [
+                      predecessor_term;
+                      n_int predecessor;
+                      cert_app "lean.NatCertificate_of_N"
+                        [ n_int predecessor ];
+                    ] )
+            in
+            let rewritten =
+              replace_certificate_path term path replacement
+            in
+            let reduced = prune_dead_leading_lets rewritten in
+            Option.bind
+              (reify (fuel - 1) reduced reduced 0 [] reduced)
+              (fun result ->
+                let result_proof =
+                  if Constr.equal rewritten reduced then result.bool_proof
+                  else
+                    Constr.mkCast
+                      ( result.bool_proof,
+                        Constr.NATIVEcast,
+                        cert_app "lean.BoolCertificate"
+                          [ rewritten; coq_bool result.bool_value ] )
+                in
+                let context_body =
+                  replace_certificate_path (Vars.lift 1 term) path
+                    (Constr.mkRel 1)
+                in
+                let context =
+                  Constr.mkLambda
+                    ( Context.make_annot Anonymous Sorts.Relevant,
+                      registered_ref "lean.Nat",
+                      context_body )
+                in
+                finish_and_share certificate_origin reduction_origin
+                  step_equalities term
+                  {
+                    bool_term = term;
+                    bool_value = result.bool_value;
+                    bool_proof =
+                      cert_app "lean.BoolCertificate_replace_nat"
+                        [
+                          context;
+                          original;
+                          replacement;
+                          value_term;
+                          coq_bool result.bool_value;
+                          original_proof;
+                          replacement_proof;
+                          result_proof;
+                        ];
+                  })
+          in
+          let rewrite_bool_primitive path original =
+            let replacement = lean_bool_constructor original.bool_value in
+            let rewritten =
+              replace_certificate_path term path replacement
+            in
+            if validate && not (checked_rewrite "Bool" rewritten) then None
+            else
+              let reduced = prune_dead_leading_lets rewritten in
+              Option.bind
+                (reify (fuel - 1) reduced reduced 0 [] reduced)
+                (fun result ->
+                let result_proof =
+                  if Constr.equal rewritten reduced then result.bool_proof
+                  else
+                    Constr.mkCast
+                      ( result.bool_proof,
+                        Constr.NATIVEcast,
+                        cert_app "lean.BoolCertificate"
+                          [ rewritten; coq_bool result.bool_value ] )
+                in
+                let context_body =
+                  replace_certificate_path (Vars.lift 1 term) path
+                    (Constr.mkRel 1)
+                in
+                let context =
+                  Constr.mkLambda
+                    ( Context.make_annot Anonymous Sorts.Relevant,
+                      registered_ref "lean.Bool",
+                      context_body )
+                in
+                let replacement_proof =
+                  cert_app "lean.BoolCertificate_of_bool"
+                    [ coq_bool original.bool_value ]
+                in
+                finish_and_share certificate_origin reduction_origin
+                  step_equalities term
+                  {
+                    bool_term = term;
+                    bool_value = result.bool_value;
+                    bool_proof =
+                      cert_app "lean.BoolCertificate_replace_bool"
+                        [
+                          context;
+                          original.bool_term;
+                          replacement;
+                          coq_bool original.bool_value;
+                          coq_bool result.bool_value;
+                          original.bool_proof;
+                          replacement_proof;
+                          result_proof;
+                        ];
+                  })
+          in
+          let reduce_demanded () =
+            let exception Primitive of
+              certificate_path_step list * bool_certificate
+            in
+            let reduced_path = ref None in
+            try
+              match
+                reduce_definitional_once
+                  ~before:(fun local_env depth path candidate ->
+                    match primitive local_env depth candidate with
+                    | Some certificate ->
+                      raise (Primitive (List.rev path, certificate))
+                    | None -> ())
+                  ~after:(fun _ _ path _ _ ->
+                    reduced_path := Some (List.rev path))
+                  env evd term
+              with
+              | Some reduced ->
+                (match !reduced_path with
+                | Some path -> `Reduced (path, reduced)
+                | None -> `Stuck)
+              | None -> `Stuck
+            with Primitive (path, certificate) ->
+              `Primitive (path, certificate)
+          in
+          match first_compact_nat_discriminator env term with
+          | Some (path, value) -> rewrite_compact path value
+          | None -> (
+            match reduce_demanded () with
+            | `Primitive (path, original) ->
+              rewrite_bool_primitive path original
+            | `Reduced (path, reduced) -> continue_reduction path reduced
+            | `Stuck -> (
+          match first_primitive term with
+          | Some (path, original) -> rewrite_bool_primitive path original
+          | None -> (
+          match first_reifiable_nat env evd 0 term with
+          | Some (path, original) ->
+            if debug then
+              Printf.eprintf
+                "[bool-certificate] nat=%s path=%d\n%!"
+                (Z.to_string original.nat_value) (List.length path);
+            let canonical = cert_app "lean.Nat_of_N" [ n_int original.nat_value ] in
+            let canonical_proof =
+              cert_app "lean.NatCertificate_of_N"
+                [ n_int original.nat_value ]
+            in
+            let equality =
+              cert_app "lean.NatCertificate_equal"
+                [
+                  original.nat_term;
+                  canonical;
+                  n_int original.nat_value;
+                  original.nat_proof;
+                  canonical_proof;
+                ]
+            in
+            Option.bind
+              (localized_bool_rewrite env equality term path)
+              (fun (left, rewritten, rewrite_proof) ->
+                Option.bind
+                  (reify (fuel - 1) rewritten rewritten 0 [] rewritten)
+                  (fun result ->
+                    finish_and_share certificate_origin reduction_origin
+                      step_equalities left
+                      {
+                        bool_term = left;
+                        bool_value = result.bool_value;
+                        bool_proof =
+                          cert_app "lean.BoolCertificate_of_eq"
+                            [
+                              left;
+                              rewritten;
+                              coq_bool result.bool_value;
+                              rewrite_proof;
+                              result.bool_proof;
+                            ];
+                      }))
+          | None ->
+            if debug then
+              Printf.eprintf "[bool-certificate] stuck on %s (%s)\n%!"
+                (constr_kind_tag term) (debug_head_shape term);
+            None
+          ))))
+  in
+  let reify_forward original =
+    let chunk_limit = 16 in
+    let refl term = cert_app "lean.Bool_defeq" [ term ] in
+    let defeq left right =
+      Constr.mkCast
+        (refl left, Constr.DEFAULTcast, equality_type env left right)
+    in
+    let trans left middle right first second =
+      cert_app "lean.BoolEquality_trans"
+        [ left; middle; right; first; second ]
+    in
+    let checkpoint segments chunk_origin chunk current =
+      let left, right, proof =
+        share_bool_equality chunk_origin current chunk
+      in
+      (left, right, proof) :: segments
+    in
+    let rec append_step segments chunk_origin chunk chunk_length current
+        left right proof =
+      if not (Constr.equal current left) then
+        let defeq = refl current in
+        let state =
+          append_step segments chunk_origin chunk chunk_length current
+            current left defeq
+        in
+        let segments, chunk_origin, chunk, chunk_length, current = state in
+        append_step segments chunk_origin chunk chunk_length current left right
+          proof
+      else
+        let chunk = trans chunk_origin left right chunk proof in
+        let chunk_length = chunk_length + 1 in
+        if chunk_length >= chunk_limit then
+          let segments = checkpoint segments chunk_origin chunk right in
+          segments, right, refl right, 0, right
+        else segments, chunk_origin, chunk, chunk_length, right
+    in
+    let finish segments chunk_origin chunk chunk_length current result =
+      let equality, endpoint =
+        List.fold_left
+          (fun (equality, endpoint) (left, right, segment) ->
+            let equality =
+              if Constr.equal endpoint left then equality
+              else
+                trans original endpoint left equality
+                  (defeq endpoint left)
+            in
+            trans original left right equality segment, right)
+          (refl original, original) (List.rev segments)
+      in
+      let equality, endpoint =
+        if chunk_length = 0 then equality, endpoint
+        else
+          let equality =
+            if Constr.equal endpoint chunk_origin then equality
+            else
+              trans original endpoint chunk_origin equality
+                (defeq endpoint chunk_origin)
+          in
+          ( trans original chunk_origin current equality chunk,
+            current )
+      in
+      if not (Constr.equal endpoint current) then raise Not_found;
+      let result =
+        {
+          bool_term = original;
+          bool_value = result.bool_value;
+          bool_proof =
+            cert_app "lean.BoolCertificate_of_eq"
+              [
+                original;
+                current;
+                coq_bool result.bool_value;
+                equality;
+                result.bool_proof;
+              ];
+        }
+      in
+      Some (share_bool_certificate result)
+    in
+    let rewrite_nat current path original_nat replacement value
+        original_proof replacement_proof =
+      let equality =
+        cert_app "lean.NatCertificate_equal"
+          [
+            original_nat;
+            replacement;
+            value;
+            original_proof;
+            replacement_proof;
+          ]
+      in
+      localized_bool_rewrite env equality current path
+    in
+    let rewrite_compact current path value =
+      let original_nat = subterm_at_certificate_path current path in
+      let value_term = n_int value in
+      let original_proof =
+        cert_app "lean.NatCertificate_of_N" [ value_term ]
+      in
+      let replacement, replacement_proof =
+        if Z.equal value Z.zero then
+          lean_nat_constructor 1, registered_ref "lean.NatCertificate_zero"
+        else
+          let predecessor = Z.pred value in
+          let predecessor_term =
+            cert_app "lean.Nat_of_N" [ n_int predecessor ]
+          in
+          ( Constr.mkApp
+              (lean_nat_constructor 2, [| predecessor_term |]),
+            cert_app "lean.NatCertificate_succ"
+              [
+                predecessor_term;
+                n_int predecessor;
+                cert_app "lean.NatCertificate_of_N" [ n_int predecessor ];
+              ] )
+      in
+      rewrite_nat current path original_nat replacement value_term
+        original_proof replacement_proof
+    in
+    let rewrite_bool current path certificate =
+      let replacement = lean_bool_constructor certificate.bool_value in
+      let replacement_proof =
+        cert_app "lean.BoolCertificate_of_bool"
+          [ coq_bool certificate.bool_value ]
+      in
+      let equality =
+        cert_app "lean.BoolCertificate_equal"
+          [
+            certificate.bool_term;
+            replacement;
+            coq_bool certificate.bool_value;
+            certificate.bool_proof;
+            replacement_proof;
+          ]
+      in
+      localized_bool_rewrite env equality current path
+    in
+    let reduce_demanded current =
+      let current_env = refresh_local_env env in
+      let current_evd = Evd.from_env current_env in
+      let exception Primitive of
+        certificate_path_step list * bool_certificate
+      in
+      let reduce_shared_state () =
+        let head, arguments = Constr.decompose_app current in
+        match Constr.kind head with
+        | Const ((constant, instance) as constant_instance)
+          when List.exists
+                 (fun shared ->
+                   Environ.QConstant.equal current_env constant shared)
+                 !shared_bool_states ->
+          let body =
+            Environ.constant_value_in current_env constant_instance
+          in
+          Some ([], beta_apply body arguments)
+        | _ -> None
+      in
+      let reduce_shared_argument () =
+        let head, arguments = Constr.decompose_app current in
+        let is_shared_context =
+          match Constr.kind head with
+          | Const (constant, _) ->
+            List.exists
+              (fun shared ->
+                Environ.QConstant.equal current_env constant shared)
+              !shared_bool_contexts
+          | _ -> false
+        in
+        if not is_shared_context then None
+        else
+          let rec reduce_argument index =
+            if index = Array.length arguments then None
+            else
+              let reduced_path = ref None in
+              match
+                reduce_definitional_once
+                  ~before:(fun local_env depth path candidate ->
+                    match primitive local_env depth candidate with
+                    | Some certificate ->
+                      raise
+                        (Primitive
+                           ( AppArgument index :: List.rev path,
+                             certificate ))
+                    | None -> ())
+                  ~after:(fun _ _ path _ _ ->
+                    reduced_path := Some (List.rev path))
+                  current_env current_evd arguments.(index)
+              with
+              | Some reduced_argument -> (
+                match !reduced_path with
+                | None -> reduce_argument (index + 1)
+                | Some path ->
+                  let reduced_arguments = Array.copy arguments in
+                  reduced_arguments.(index) <- reduced_argument;
+                  Some
+                    ( AppArgument index :: path,
+                      Constr.mkApp (head, reduced_arguments) ))
+              | None -> reduce_argument (index + 1)
+          in
+          reduce_argument 0
+      in
+      let reduced_path = ref None in
+      try
+        match reduce_shared_state () with
+        | Some (path, reduced) -> `Reduced (path, reduced)
+        | None -> (
+        match reduce_shared_argument () with
+        | Some (path, reduced) -> `Reduced (path, reduced)
+        | None -> (
+          match
+            reduce_definitional_once
+              ~before:(fun local_env depth path candidate ->
+                match primitive local_env depth candidate with
+                | Some certificate ->
+                  raise (Primitive (List.rev path, certificate))
+                | None -> ())
+              ~after:(fun _ _ path _ _ ->
+                reduced_path := Some (List.rev path))
+              current_env current_evd current
+          with
+          | Some reduced -> (
+            match !reduced_path with
+            | Some path -> `Reduced (path, reduced)
+            | None -> `Stuck)
+          | None -> `Stuck))
+      with Primitive (path, certificate) -> `Primitive (path, certificate)
+    in
+    let rec evaluate fuel segments chunk_origin chunk chunk_length current =
+      if fuel = 0 then None
+      else
+        match bool_constructor_value env current with
+        | Some value ->
+          finish segments chunk_origin chunk chunk_length current
+            {
+              bool_term = current;
+              bool_value = value;
+              bool_proof =
+                cert_app "lean.BoolCertificate_of_bool" [ coq_bool value ];
+            }
+        | None -> (
+          match primitive env 0 current with
+          | Some result ->
+            finish segments chunk_origin chunk chunk_length current result
+          | None -> (
+            let continue ?(isolated = false) left right proof =
+              let segments, chunk_origin, chunk, chunk_length, current =
+                if isolated && chunk_length <> 0 then
+                  let segments =
+                    checkpoint segments chunk_origin chunk current
+                  in
+                  segments, current, refl current, 0, current
+                else segments, chunk_origin, chunk, chunk_length, current
+              in
+              let segments, chunk_origin, chunk, chunk_length, current =
+                append_step segments chunk_origin chunk chunk_length current
+                  left right proof
+              in
+              let segments, chunk_origin, chunk, chunk_length, current =
+                if isolated && chunk_length <> 0 then
+                  let segments =
+                    checkpoint segments chunk_origin chunk current
+                  in
+                  segments, current, refl current, 0, current
+                else segments, chunk_origin, chunk, chunk_length, current
+              in
+              evaluate (fuel - 1) segments chunk_origin chunk chunk_length
+                current
+            in
+            let continue_defeq reduced =
+              continue current reduced (refl current)
+            in
+            let continue_rewrite = function
+              | Some (left, right, proof) ->
+                continue ~isolated:!dependent_rewrite left right proof
+              | None -> None
+            in
+            match first_compact_nat_discriminator env current with
+            | Some (path, value) ->
+              incr exposures;
+              continue_rewrite (rewrite_compact current path value)
+            | None -> (
+              match reduce_demanded current with
+              | `Reduced (path, reduced) -> (
+                if debug then (
+                  let redex = subterm_at_certificate_path current path in
+                  let contractum = subterm_at_certificate_path reduced path in
+                  Printf.eprintf
+                    "[bool-certificate] definitional step path=%d[%s] left=(%s) right=(%s) redex=(%s) contractum=(%s)\n%!"
+                    (List.length path) (string_of_certificate_path path)
+                    (debug_head_shape current)
+                    (debug_head_shape reduced) (debug_head_shape redex)
+                    (debug_head_shape contractum));
+                let localized =
+                  Option.bind
+                    (local_definitional_equality env current reduced path)
+                    (fun equality ->
+                      localized_bool_rewrite env equality current path)
+                in
+                match localized with
+                | Some (left, right, equality) ->
+                  let isolated = !dependent_rewrite in
+                  continue ~isolated left right equality
+                | None -> (
+                  match
+                    _contextual_definitional_equality env current reduced path
+                  with
+                  | Some equality ->
+                    continue ~isolated:true equality.bool_equality_left
+                      equality.bool_equality_right
+                      equality.bool_equality_proof
+                  | None ->
+                    if debug then
+                      Printf.eprintf
+                        "[bool-certificate] localized definitional proof unavailable\n%!";
+                    continue_defeq reduced))
+              | `Primitive (path, certificate) ->
+                continue_rewrite (rewrite_bool current path certificate)
+              | `Stuck -> (
+                match first_primitive current with
+                | Some (path, certificate) ->
+                  continue_rewrite (rewrite_bool current path certificate)
+                | None -> (
+                  match first_reifiable_nat env evd 0 current with
+                  | Some (path, certificate) ->
+                    let canonical =
+                      cert_app "lean.Nat_of_N"
+                        [ n_int certificate.nat_value ]
+                    in
+                    let canonical_proof =
+                      cert_app "lean.NatCertificate_of_N"
+                        [ n_int certificate.nat_value ]
+                    in
+                    continue_rewrite
+                      (rewrite_nat current path certificate.nat_term canonical
+                         (n_int certificate.nat_value) certificate.nat_proof
+                         canonical_proof)
+                  | None ->
+                    if debug then
+                      Printf.eprintf
+                        "[bool-certificate] forward evaluator stuck on %s\n%!"
+                        (debug_head_shape current);
+                    None)))))
+    in
+    evaluate 100_000 [] original (refl original) 0 original
+  in
+  let result =
+    if not (Vars.closed0 term) || not (is_bool_type env evd term) then None
+    else
+      match Sys.getenv_opt "ROCQ_LEAN_LEGACY_CERT" with
+      | Some _ -> reify 100_000 term term 0 [] term
+      | None -> reify_forward term
+  in
+  if debug then
+    Printf.eprintf
+      "[bool-certificate] done steps=%d exposures=%d success=%b\n%!" !steps
+      !exposures (Option.has_some result);
+  Option.map share_bool_certificate result
+
+let rec first_certified_bool_difference env evd path actual expected =
+  if Constr.equal actual expected then None
+  else
+    match reify_bool env evd actual, reify_bool env evd expected with
+    | Some left, Some right when Bool.equal left.bool_value right.bool_value ->
+      Some (List.rev path, left, right)
+    | _ -> (
+      match Constr.kind actual, Constr.kind expected with
+      | Prod (_, actual_domain, actual_body),
+        Prod (_, expected_domain, expected_body) -> (
+        match
+          first_certified_bool_difference env evd (ProdDomain :: path)
+            actual_domain expected_domain
+        with
+        | Some _ as result -> result
+        | None ->
+          first_certified_bool_difference env evd (ProdCodomain :: path)
+            actual_body expected_body)
+      | Lambda (_, actual_domain, actual_body),
+        Lambda (_, expected_domain, expected_body) -> (
+        match
+          first_certified_bool_difference env evd (LambdaDomain :: path)
+            actual_domain expected_domain
+        with
+        | Some _ as result -> result
+        | None ->
+          first_certified_bool_difference env evd (LambdaBody :: path)
+            actual_body expected_body)
+      | LetIn (_, actual_value, actual_type, actual_body),
+        LetIn (_, expected_value, expected_type, expected_body) -> (
+        match
+          first_certified_bool_difference env evd (LetValue :: path)
+            actual_value expected_value
+        with
+        | Some _ as result -> result
+        | None -> (
+          match
+            first_certified_bool_difference env evd (LetType :: path)
+              actual_type expected_type
+          with
+          | Some _ as result -> result
+          | None ->
+            first_certified_bool_difference env evd (LetBody :: path)
+              actual_body expected_body))
+      | App _, App _ ->
+        let actual_head, actual_args = Constr.decompose_app actual in
+        let expected_head, expected_args = Constr.decompose_app expected in
+        if
+          not (Constr.equal actual_head expected_head)
+          || Array.length actual_args <> Array.length expected_args
+        then None
+        else
+          let rec scan index =
+            if index = Array.length actual_args then None
+            else
+              match
+                first_certified_bool_difference env evd
+                  (AppArgument index :: path)
+                  actual_args.(index) expected_args.(index)
+              with
+              | Some _ as result -> result
+              | None -> scan (index + 1)
+          in
+          scan 0
+      | _ -> None)
 
 let is_sprop_type env evd ty =
   let sort =
@@ -3411,25 +5800,76 @@ let transport_closed_nat env evd actual expected argument =
     in
     transport 16 actual argument
 
-let maybe_transport_to_expected env evd expected argument =
+let transport_closed_bool env evd actual expected argument =
+  if not (is_sprop_type env evd actual) then None
+  else
+    let rec transport fuel actual argument =
+      if Constr.equal actual expected then Some argument
+      else if fuel = 0 then None
+      else
+        match first_certified_bool_difference env evd [] actual expected with
+        | None -> None
+        | Some (path, left, right) ->
+          let value = coq_bool left.bool_value in
+          let equality =
+            cert_app "lean.BoolCertificate_equal"
+              [
+                left.bool_term;
+                right.bool_term;
+                value;
+                left.bool_proof;
+                right.bool_proof;
+              ]
+          in
+          let motive_body =
+            replace_certificate_path (Vars.lift 1 actual) path (Constr.mkRel 1)
+          in
+          let motive =
+            Constr.mkLambda
+              ( Context.make_annot Anonymous Sorts.Relevant,
+                registered_ref "lean.Bool",
+                motive_body )
+          in
+          let argument =
+            cert_app "lean.Bool_transport_sprop"
+              [ motive; left.bool_term; right.bool_term; equality; argument ]
+          in
+          let actual = replace_certificate_path actual path right.bool_term in
+          transport (fuel - 1) actual argument
+    in
+    transport 16 actual argument
+
+let maybe_transport_to_expected ?(eager_reduce = false) env evd expected argument =
   let actual =
     Retyping.get_type_of env evd (EConstr.of_constr argument)
     |> EConstr.Unsafe.to_constr
   in
   if Constr.equal actual expected then argument
+  else if
+    eager_reduce
+    && Option.has_some (Sys.getenv_opt "ROCQ_LEAN_DISABLE_CERT")
+  then argument
   else
     match transport_closed_nat env evd actual expected argument with
     | Some argument -> argument
+    | None when eager_reduce -> (
+      match transport_closed_bool env evd actual expected argument with
+      | Some argument ->
+        if Option.has_some (Sys.getenv_opt "ROCQ_LEAN_CERT_DEBUG") then
+          Printf.eprintf "[bool-certificate] transport constructed\n%!";
+        argument
+      | None -> argument)
     | None -> argument
 
-let maybe_transport_application env evd function_term argument =
+let maybe_transport_application ?(eager_reduce = false) env evd function_term
+    argument =
   let function_type =
     Retyping.get_type_of env evd (EConstr.of_constr function_term)
     |> Reductionops.whd_all env evd |> EConstr.Unsafe.to_constr
   in
   match Constr.kind function_type with
   | Prod (_, expected, _) ->
-    maybe_transport_to_expected env evd expected argument
+    maybe_transport_to_expected ~eager_reduce env evd expected argument
   | _ -> argument
 
 let rec to_constr =
@@ -3463,6 +5903,12 @@ let rec to_constr =
               (fun function_ (argument_expr, argument) ->
                 let argument =
                   match argument_expr with
+                  | expression when is_eager_reduce_application expression ->
+                    with_env_evm env uconv
+                      (fun env evd () ->
+                        maybe_transport_application ~eager_reduce:true env evd
+                          function_ argument)
+                      ()
                   | Bound _ ->
                     with_env_evm env uconv
                       (fun env evd () ->
@@ -3564,6 +6010,15 @@ let rec to_constr =
         to_constr env a >>= fun a ->
         to_constr env b_expr >>= fun b ->
         (match b_expr with
+        | expression when is_eager_reduce_application expression ->
+          get_uconv >>= fun uconv ->
+          let b =
+            with_env_evm env uconv
+              (fun env evd () ->
+                maybe_transport_application ~eager_reduce:true env evd a b)
+              ()
+          in
+          ret (mkApp (a, [| b |]))
         | Bound _ ->
           get_uconv >>= fun uconv ->
           let b =
@@ -3745,6 +6200,7 @@ and declare_def { name = n; ty; body; univs; } i =
           | Beq
           | Ble
           | Blt
+          | Nat_decEq
           | Nat_isValidChar
           | IsValidChar_UInt32
           | IsValidChar_UInt32_match_1_1
@@ -3916,7 +6372,9 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
         squashy,
         [] )
     | Some
-        ( ( ( Bool
+        ( ( ( False
+            | Decidable
+            | Bool
             | Nat
             | Nat_le
             | Or

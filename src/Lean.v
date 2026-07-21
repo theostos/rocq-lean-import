@@ -133,6 +133,12 @@ Record And@{} (a a0 : SProp) : SProp := And_intro
 Register And as lean.And.
 
 Inductive sEmpty : SProp := .
+Register sEmpty as lean.False.
+
+Inductive Decidable (p : SProp) : Type :=
+| Decidable_isFalse : (p -> sEmpty) -> Decidable p
+| Decidable_isTrue : p -> Decidable p.
+Register Decidable as lean.Decidable.
 
 Section nat_notation.
   Import ZifyClasses ZArith NArith.
@@ -287,6 +293,38 @@ Fixpoint Nat_ble n m :=
 
 Definition Nat_blt n m := Nat_ble (Nat_succ n) m.
 
+Lemma Nat_beq_refl (n : Nat) : Logic.eq (Nat_beq n n) Bool_true.
+Proof.
+  induction n as [|n IH]; cbn [Nat_beq]; assumption || reflexivity.
+Qed.
+
+Lemma Nat_beq_true_eq (n m : Nat) :
+  Logic.eq (Nat_beq n m) Bool_true -> eq n m.
+Proof.
+  revert m.
+  induction n as [|n IH]; intros [|m] H; cbn [Nat_beq] in H.
+  - exact (eq_refl Nat_zero).
+  - discriminate H.
+  - discriminate H.
+  - destruct (IH m H). constructor.
+Qed.
+
+Lemma Nat_beq_false_ne (n m : Nat) :
+  Logic.eq (Nat_beq n m) Bool_false -> eq n m -> sEmpty.
+Proof.
+  intros H E.
+  destruct E.
+  rewrite Nat_beq_refl in H.
+  discriminate H.
+Qed.
+
+Definition Nat_decEq (n m : Nat) : Decidable (eq n m).
+Proof.
+  destruct (Nat_beq n m) eqn:H.
+  - exact (Decidable_isFalse _ (Nat_beq_false_ne n m H)).
+  - exact (Decidable_isTrue _ (Nat_beq_true_eq n m H)).
+Defined.
+
 Register Nat_add as lean.Nat_add.
 Register Nat_mul as lean.Nat_mul.
 Register Nat_pow as lean.Nat_pow.
@@ -295,7 +333,7 @@ Register Nat_sub as lean.Nat_sub.
 Register Nat_beq as lean.Nat_beq.
 Register Nat_ble as lean.Nat_ble.
 Register Nat_blt as lean.Nat_blt.
-Register Nat_of_N as lean.Nat_of_N.
+Register Nat_decEq as lean.Nat_decEq.
 
 Import NArith.
 
@@ -405,12 +443,29 @@ Proof.
   - now rewrite IH.
 Qed.
 
-Lemma NatCertificate_of_N (n : N) : NatCertificate (Nat_of_N n) n.
+Lemma NatCertificate_of_N_transparent (n : N) :
+  NatCertificate (Nat_of_N n) n.
 Proof.
   unfold NatCertificate, N_of_Nat, Nat_of_N.
   rewrite nat2Natid_logic, N2Nat.id.
   reflexivity.
 Qed.
+
+(** Fused binary decoding exposes only the constructors demanded by the
+    consumer.  In contrast, [Nat_of_nat (N.to_nat n)] first allocates the
+    complete unary intermediate before Lean's [Nat] can be inspected. *)
+Fixpoint CompactPos (p : positive) : Nat :=
+  match p with
+  | xH => Nat_succ Nat_zero
+  | xO p => double (CompactPos p)
+  | xI p => Nat_succ (double (CompactPos p))
+  end.
+
+Definition CompactNat (n : N) : Nat :=
+  match n with
+  | N0 => Nat_zero
+  | Npos p => CompactPos p
+  end.
 
 Lemma NatCertificate_succ (x : Nat) (n : N) :
   NatCertificate x n -> NatCertificate (Nat_succ x) (N.succ n).
@@ -420,6 +475,51 @@ Proof.
   intro H.
   now rewrite Nat2N.inj_succ, H.
 Qed.
+
+Import Lia.
+
+Lemma nat_of_Nat_double_logic (x : Nat) :
+  Logic.eq (nat_of_Nat (double x)) (2 * nat_of_Nat x)%nat.
+Proof.
+  induction x as [|x IH]; cbn [double nat_of_Nat].
+  - reflexivity.
+  - rewrite IH. lia.
+Qed.
+
+Lemma NatCertificate_double (x : Nat) (n : N) :
+  NatCertificate x n -> NatCertificate (double x) (2 * n)%N.
+Proof.
+  unfold NatCertificate, N_of_Nat.
+  intro H.
+  rewrite nat_of_Nat_double_logic, Nat2N.inj_mul, H.
+  reflexivity.
+Qed.
+
+Lemma NatCertificate_CompactPos (p : positive) :
+  NatCertificate (CompactPos p) (Npos p).
+Proof.
+  induction p as [p IH|p IH|]; cbn [CompactPos].
+  - change
+      (NatCertificate (Nat_succ (double (CompactPos p)))
+         (N.succ (2 * Npos p)%N)).
+    apply NatCertificate_succ.
+    exact (NatCertificate_double _ _ IH).
+  - change
+      (NatCertificate (double (CompactPos p)) (2 * Npos p)%N).
+    exact (NatCertificate_double _ _ IH).
+  - unfold NatCertificate, N_of_Nat. reflexivity.
+Qed.
+
+Lemma NatCertificate_of_N (n : N) : NatCertificate (CompactNat n) n.
+Proof.
+  destruct n as [|p]; cbn [CompactNat].
+  - exact NatCertificate_zero.
+  - exact (NatCertificate_CompactPos p).
+Qed.
+
+(** [CompactNat] is kept transparent so weak-head reduction can reveal one
+    constructor at a time without first materializing the complete unary
+    normal form. *)
 
 Lemma NatCertificate_add (a b : Nat) (na nb : N) :
   NatCertificate a na -> NatCertificate b nb ->
@@ -503,8 +603,9 @@ Definition bool_of_Bool (b : Bool) : bool :=
 Definition Bool_of_bool (b : bool) : Bool :=
   if b then Bool_true else Bool_false.
 
-Definition BoolCertificate (x : Bool) (b : bool) : Prop :=
-  Logic.eq (bool_of_Bool x) b.
+Inductive BoolCertificate : Bool -> bool -> SProp :=
+| BoolCertificate_false : BoolCertificate Bool_false false
+| BoolCertificate_true : BoolCertificate Bool_true true.
 
 Lemma Bool_of_bool_bool_of_Bool_logic (b : Bool) :
   Logic.eq (Bool_of_bool (bool_of_Bool b)) b.
@@ -512,21 +613,190 @@ Proof. destruct b; reflexivity. Qed.
 
 Lemma BoolCertificate_of_bool (b : bool) :
   BoolCertificate (Bool_of_bool b) b.
-Proof. destruct b; reflexivity. Qed.
+Proof. destruct b; constructor. Qed.
+
+Lemma BoolCertificate_of_logic (x : Bool) (b : bool) :
+  Logic.eq (bool_of_Bool x) b -> BoolCertificate x b.
+Proof.
+  destruct x, b; cbn; intro H; try discriminate H; constructor.
+Qed.
 
 Lemma BoolCertificate_equal (a b : Bool) (value : bool) :
   BoolCertificate a value -> BoolCertificate b value -> eq a b.
 Proof.
-  unfold BoolCertificate.
-  intros Ha Hb.
-  assert (Logic.eq a b) as Hab.
-  { apply (f_equal Bool_of_bool) in Ha.
-    apply (f_equal Bool_of_bool) in Hb.
-    rewrite !Bool_of_bool_bool_of_Bool_logic in Ha, Hb.
-    exact (Logic.eq_trans Ha (Logic.eq_sym Hb)). }
-  destruct Hab.
-  constructor.
+  intros Ha Hb. destruct Ha; inversion Hb; constructor.
 Qed.
+
+Definition Bool_defeq (a : Bool) : eq a a := eq_refl a.
+
+Definition BoolCertificate_of_eq (a b : Bool) (value : bool)
+    (e : eq a b) (certificate : BoolCertificate b value) :
+    BoolCertificate a value :=
+  match e in eq _ b return BoolCertificate b value -> BoolCertificate a value with
+  | eq_refl _ => fun certificate => certificate
+  end certificate.
+
+Definition BoolEquality_trans (a b c : Bool) :
+    eq a b -> eq b c -> eq a c :=
+  fun ab bc =>
+    match ab in eq _ b return eq b c -> eq a c with
+    | eq_refl _ => fun bc => bc
+    end bc.
+
+Definition BoolCertificate_replace_nat (context : Nat -> Bool)
+    (a b : Nat) (value : N) (result : bool)
+    (a_certificate : NatCertificate a value)
+    (b_certificate : NatCertificate b value)
+    (certificate : BoolCertificate (context b) result) :
+    BoolCertificate (context a) result :=
+  BoolCertificate_of_eq (context a) (context b) result
+    (match NatCertificate_equal a b value a_certificate b_certificate with
+     | eq_refl _ => eq_refl (context a)
+  end)
+    certificate.
+
+Definition BoolCertificate_replace_bool (context : Bool -> Bool)
+    (a b : Bool) (value result : bool)
+    (a_certificate : BoolCertificate a value)
+    (b_certificate : BoolCertificate b value)
+    (certificate : BoolCertificate (context b) result) :
+    BoolCertificate (context a) result :=
+  BoolCertificate_of_eq (context a) (context b) result
+    (match BoolCertificate_equal a b value a_certificate b_certificate with
+     | eq_refl _ => eq_refl (context a)
+  end)
+    certificate.
+
+Polymorphic Definition definitional_eq@{u} {A : Type@{u}} (a : A) :
+    eq a a := eq_refl a.
+
+(** Homogeneous congruence at an explicitly chosen typed zipper boundary. *)
+Polymorphic Definition Equality_replace_def@{u v}
+    {A : Type@{u}} {B : Type@{v}} (context : A -> B)
+    (a b : A) (e : eq a b) : eq (context a) (context b) :=
+  match e in eq _ b return eq (context a) (context b) with
+  | eq_refl _ => eq_refl (context a)
+  end.
+
+(** Equality transported through a dependent context cannot in general remain
+    homogeneous at every intermediate zipper boundary.  Keep both the
+    equality of endpoint types and the equality after its checked transport.
+    Since Lean equality lives in [SProp], [Definitional UIP] makes a transport
+    along [A = A] definitionally identical to the identity. *)
+Inductive TypeEquality@{u|} (A : Type@{u}) : Type@{u} -> SProp :=
+| TypeEquality_refl : TypeEquality A A.
+
+Polymorphic Inductive Packed@{u} : Type@{u+1} :=
+| Packed_intro : forall A : Type@{u}, A -> Packed.
+
+Polymorphic Definition HEquality_cast@{u}
+    {A B : Type@{u}} (e : @TypeEquality@{u} A B) (a : A) : B :=
+  match e in @TypeEquality _ B' return A -> B' with
+  | @TypeEquality_refl _ => fun x => x
+  end a.
+
+Inductive HEquality@{u|} {A : Type@{u}} (a : A) :
+    forall B : Type@{u}, B -> SProp :=
+| HEquality_intro : forall (B : Type@{u}) (b : B)
+    (types : TypeEquality A B),
+    eq (HEquality_cast types a) b -> HEquality a B b.
+
+Polymorphic Definition Equality_transport@{u v}
+    {A : Type@{u}} (B : A -> Type@{v})
+    {a b : A} (e : eq a b) (x : B a) : B b :=
+  match e in eq _ b' return B b' with
+  | eq_refl _ => x
+  end.
+
+(** Congruence for replacing the first argument of a dependent binary
+    application.  The second argument is transported explicitly, so the
+    generated context is well typed even before the equality is reduced. *)
+Polymorphic Lemma HEquality_app2_replace_def@{u v w}
+    {A : Type@{u}} {B : A -> Type@{v}}
+    {C : forall a : A, B a -> Type@{w}}
+    (f : forall (a : A) (b : B a), C a b)
+    (a a' : A) (e : eq a a') (b : B a) :
+    HEquality (f a b) _
+      (f a' (Equality_transport B e b)).
+Proof.
+  destruct e.
+  apply HEquality_intro with (types := TypeEquality_refl (C a b)).
+  exact (eq_refl (f a b)).
+Defined.
+
+Polymorphic Lemma HEquality_replace_def@{u v}
+    {A : Type@{u}} {B : A -> Type@{v}}
+    (context : forall x : A, B x) (a b : A) (e : eq a b) :
+    HEquality (context a) _ (context b).
+Proof.
+  destruct e.
+  apply HEquality_intro with (types := TypeEquality_refl (B a)).
+  exact (eq_refl (context a)).
+Defined.
+
+Polymorphic Definition HEquality_types@{u}
+    {A : Type@{u}} (a : A) {B : Type@{u}} (b : B)
+    (e : HEquality a B b) : TypeEquality A B :=
+  match e in HEquality _ B' b' return TypeEquality A B' with
+  | HEquality_intro _ _ _ types _ => types
+  end.
+
+Polymorphic Definition HEquality_values@{u}
+    {A : Type@{u}} (a : A) {B : Type@{u}} (b : B)
+    (e : HEquality a B b) :
+    eq (HEquality_cast (HEquality_types a b e) a) b :=
+  match e as e' in HEquality _ B' b' return
+      eq (HEquality_cast (HEquality_types a b' e') a) b' with
+  | HEquality_intro _ _ _ _ values => values
+  end.
+
+Polymorphic Definition PackedEquality_replace_def@{u v w | v < w}
+    {A : Type@{u}} (context : A -> Packed@{v})
+    (a b : A) (e : @eq@{u} A a b) :
+    @eq@{w} Packed@{v} (context a) (context b) :=
+  match e in eq _ b return eq (context a) (context b) with
+  | eq_refl _ => eq_refl (context a)
+  end.
+
+Polymorphic Definition PackedEquality_to_HEquality@{u w | u < w}
+    {A B : Type@{u}} (a : A) (b : B)
+    (e : @eq@{w} Packed@{u}
+      (Packed_intro A a) (Packed_intro B b)) : HEquality a B b :=
+  match e in eq _ packed return
+      match packed with
+      | Packed_intro B b => HEquality a B b
+      end with
+  | eq_refl _ =>
+      HEquality_intro a A a (TypeEquality_refl A) (eq_refl a)
+  end.
+
+Polymorphic Lemma HEquality_to_equality@{u}
+    {A : Type@{u}} (a b : A) (e : @HEquality@{u} A a A b) :
+    @eq@{u} A a b.
+Proof.
+  exact (HEquality_values a b e).
+Qed.
+
+(** Congruence for a definitionally-equal replacement inside a Boolean
+    expression.  The importer instantiates this below any surrounding local
+    definitions, then closes the proof by rebuilding the same [let] spine.
+    Consequently the kernel only has to check conversion of the changed
+    subterm, rather than conversion of the complete closed computation. *)
+Polymorphic Definition BoolEquality_replace_def@{u}
+    {A : Type@{u}} (context : A -> Bool) (a b : A) (e : eq a b) :
+    eq (context a) (context b) :=
+  match e in eq _ b return eq (context a) (context b) with
+  | eq_refl _ => eq_refl (context a)
+  end.
+
+Polymorphic Definition BoolCertificate_replace_def@{u}
+    {A : Type@{u}} (context : A -> Bool) (a b : A) (result : bool)
+    (e : eq a b) (certificate : BoolCertificate (context b) result) :
+    BoolCertificate (context a) result :=
+  match e in eq _ b return
+      BoolCertificate (context b) result -> BoolCertificate (context a) result with
+  | eq_refl _ => fun certificate => certificate
+  end certificate.
 
 Lemma bool_of_Nat_beq_logic (a b : Nat) :
   Logic.eq (bool_of_Bool (Nat_beq a b))
@@ -555,8 +825,9 @@ Lemma NatCertificate_beq (a b : Nat) (na nb : N) :
   NatCertificate a na -> NatCertificate b nb ->
   BoolCertificate (Nat_beq a b) (N.eqb na nb).
 Proof.
-  unfold NatCertificate, BoolCertificate, N_of_Nat.
   intros Ha Hb.
+  apply BoolCertificate_of_logic.
+  unfold NatCertificate, N_of_Nat in Ha, Hb.
   rewrite bool_of_Nat_beq_logic.
   rewrite PeanoNat.Nat.eqb_compare, N.eqb_compare, Nat2N.inj_compare, Ha, Hb.
   reflexivity.
@@ -566,8 +837,9 @@ Lemma NatCertificate_ble (a b : Nat) (na nb : N) :
   NatCertificate a na -> NatCertificate b nb ->
   BoolCertificate (Nat_ble a b) (N.leb na nb).
 Proof.
-  unfold NatCertificate, BoolCertificate, N_of_Nat.
   intros Ha Hb.
+  apply BoolCertificate_of_logic.
+  unfold NatCertificate, N_of_Nat in Ha, Hb.
   rewrite bool_of_Nat_ble_logic.
   rewrite PeanoNat.Nat.leb_compare, N.leb_compare, Nat2N.inj_compare, Ha, Hb.
   reflexivity.
@@ -577,8 +849,9 @@ Lemma NatCertificate_blt (a b : Nat) (na nb : N) :
   NatCertificate a na -> NatCertificate b nb ->
   BoolCertificate (Nat_blt a b) (N.ltb na nb).
 Proof.
-  unfold NatCertificate, BoolCertificate, N_of_Nat.
   intros Ha Hb.
+  apply BoolCertificate_of_logic.
+  unfold NatCertificate, N_of_Nat in Ha, Hb.
   rewrite bool_of_Nat_blt_logic.
   rewrite PeanoNat.Nat.ltb_compare, N.ltb_compare, Nat2N.inj_compare, Ha, Hb.
   reflexivity.
@@ -586,6 +859,12 @@ Qed.
 
 Definition Nat_transport_sprop (P : Nat -> SProp)
     (a b : Nat) (e : eq a b) (x : P a) : P b :=
+  match e in eq _ b return P b with
+  | eq_refl _ => x
+  end.
+
+Definition Bool_transport_sprop (P : Bool -> SProp)
+    (a b : Bool) (e : eq a b) (x : P a) : P b :=
   match e in eq _ b return P b with
   | eq_refl _ => x
   end.
@@ -600,13 +879,33 @@ Register NatCertificate_pow as lean.NatCertificate_pow.
 Register NatCertificate_sub as lean.NatCertificate_sub.
 Register NatCertificate_equal as lean.NatCertificate_equal.
 Register Nat_transport_sprop as lean.Nat_transport_sprop.
+Register Bool_transport_sprop as lean.Bool_transport_sprop.
 Register Bool_of_bool as lean.Bool_of_bool.
 Register BoolCertificate as lean.BoolCertificate.
 Register BoolCertificate_of_bool as lean.BoolCertificate_of_bool.
 Register BoolCertificate_equal as lean.BoolCertificate_equal.
+Register Bool_defeq as lean.Bool_defeq.
+Register BoolCertificate_of_eq as lean.BoolCertificate_of_eq.
+Register BoolEquality_trans as lean.BoolEquality_trans.
+Register BoolCertificate_replace_nat as lean.BoolCertificate_replace_nat.
+Register BoolCertificate_replace_bool as lean.BoolCertificate_replace_bool.
+Register definitional_eq as lean.definitional_eq.
+Register Equality_replace_def as lean.Equality_replace_def.
+Register HEquality as lean.HEquality.
+Register Equality_transport as lean.Equality_transport.
+Register HEquality_app2_replace_def as lean.HEquality_app2_replace_def.
+Register HEquality_replace_def as lean.HEquality_replace_def.
+Register Packed as lean.Packed.
+Register Packed_intro as lean.Packed_intro.
+Register PackedEquality_replace_def as lean.PackedEquality_replace_def.
+Register PackedEquality_to_HEquality as lean.PackedEquality_to_HEquality.
+Register HEquality_to_equality as lean.HEquality_to_equality.
+Register BoolEquality_replace_def as lean.BoolEquality_replace_def.
+Register BoolCertificate_replace_def as lean.BoolCertificate_replace_def.
 Register NatCertificate_beq as lean.NatCertificate_beq.
 Register NatCertificate_ble as lean.NatCertificate_ble.
 Register NatCertificate_blt as lean.NatCertificate_blt.
+Register CompactNat as lean.Nat_of_N.
 
 #[local] Set Warnings "-abstract-large-number".
 Definition UInt32_size : Nat := 0x100000000%Nat.
