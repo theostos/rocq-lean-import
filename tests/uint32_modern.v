@@ -6,3 +6,5 @@ Lean Import "../dumps/uint32_modern".
 
 Check modernUInt32Identity : UInt32 -> UInt32.
 Check modernCharIdentity : Char -> Char.
+Check toBitVec : UInt32 -> BitVec 32.
+Check val1 : Char -> UInt32.
