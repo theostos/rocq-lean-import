@@ -118,14 +118,14 @@ let project_primitive_record_scheme env (mind, ind_index) body =
           binders
       in
       let evd = Evd.from_env env in
-      let type_of term =
-        Retyping.get_type_of env evd (EConstr.of_constr term)
-      in
-      if Reductionops.is_conv env evd (type_of body) (type_of projected) then
+      if
+        Reductionops.is_conv env evd (EConstr.of_constr body)
+          (EConstr.of_constr projected)
+      then
         projected
       else
         CErrors.user_err
-          Pp.(str "Projection-based primitive-record scheme changed type")
+          Pp.(str "Projection-based primitive-record scheme changed meaning")
     | _ -> body)
   | _ -> body
 
