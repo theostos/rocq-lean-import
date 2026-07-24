@@ -2635,8 +2635,17 @@ let eta_expand_primitive_record_definition env evd ty body =
               |> EConstr.Unsafe.to_relevance
             in
             let annot = Context.make_annot Anonymous relevance in
-            Term.compose_lam binders
-              (Constr.mkLetIn (annot, result, result_ty, rebuilt)))
+            let expanded =
+              Term.compose_lam binders
+                (Constr.mkLetIn (annot, result, result_ty, rebuilt))
+            in
+            if
+              Reductionops.is_conv env evd (EConstr.of_constr body)
+                (EConstr.of_constr expanded)
+            then expanded
+            else
+              CErrors.user_err
+                Pp.(str "Eta-expanded primitive-record definition changed meaning"))
       | _ -> body)
     | _ -> body
 
