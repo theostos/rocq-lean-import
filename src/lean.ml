@@ -1091,6 +1091,32 @@ let rec is_projection_wrapper record field = function
     N.equal record projected_record && Int.equal field projected_field
   | _ -> false
 
+let collect_projection_aliases ~record_name ~record_ind ~algs projections
+    field_names =
+  let rec collect field projections names aliases =
+    match projections, names with
+    | [], [] -> List.rev aliases
+    | projection :: projections, name :: names ->
+      let aliases =
+        match name, projection with
+        | Some name, { Structures.Structure.proj_body = Some constant; _ } ->
+          ( name,
+            {
+              projection_inst = { ref = GlobRef.ConstRef constant; algs };
+              projection_record = record_name;
+              projection_ind = record_ind;
+              projection_field = field;
+            } )
+          :: aliases
+        | _ -> aliases
+      in
+      collect (field + 1) projections names aliases
+    | _ ->
+      CErrors.user_err
+        Pp.(str "Primitive-record fields and projections differ")
+  in
+  collect 0 projections field_names []
+
 let add_declared n i inst =
   declared :=
     N.Map.update n
@@ -3015,11 +3041,18 @@ let rec to_constr =
           | Some alias ->
             let mib = Global.lookup_mind (fst alias.projection_ind) in
             let nparams = mib.mind_nparams in
-            if List.length translated_args < nparams + 1 then
+            if List.length translated_args <= nparams then
               let uconv, function_ = instantiate n univs uconv in
               uconv, apply_arguments function_ translated_args
             else
-              let target = List.nth translated_args nparams in
+              let _, target_and_extra =
+                CList.chop nparams translated_args
+              in
+              let target, extra =
+                match target_and_extra with
+                | target :: extra -> (target, extra)
+                | [] -> assert false
+              in
               let projection, relevance =
                 Declareops.inductive_make_projection alias.projection_ind mib
                   ~proj_arg:alias.projection_field
@@ -3027,11 +3060,6 @@ let rec to_constr =
               let projected =
                 Constr.mkProj
                   (Projection.make projection false, relevance, target)
-              in
-              let extra =
-                List.filteri
-                  (fun index _ -> index > nparams)
-                  translated_args
               in
               uconv, apply_arguments projected extra
           | None ->
@@ -3604,31 +3632,8 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
         | _ -> []
       in
       let projection_aliases =
-        let rec collect field projections names aliases =
-          match projections, names with
-          | [], [] -> List.rev aliases
-          | projection :: projections, name :: names ->
-            let aliases =
-              match name, projection with
-              | Some name,
-                { Structures.Structure.proj_body = Some constant; _ } ->
-                ( name,
-                  {
-                    projection_inst =
-                      { ref = GlobRef.ConstRef constant; algs };
-                    projection_record = n;
-                    projection_ind = (mind, 0);
-                    projection_field = field;
-                  } )
-                :: aliases
-              | _ -> aliases
-            in
-            collect (field + 1) projections names aliases
-          | _ ->
-            CErrors.user_err
-              Pp.(str "Primitive-record fields and projections differ")
-        in
-        collect 0 projections field_names []
+        collect_projection_aliases ~record_name:n ~record_ind:(mind, 0) ~algs
+          projections field_names
       in
       let () =
         if N.equal n array_name then
