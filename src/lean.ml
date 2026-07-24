@@ -2479,23 +2479,36 @@ let nat_constructor_matches env term index =
 
 let cert_app key args = Constr.mkApp (registered_ref key, Array.of_list args)
 
-let rec z_of_positive env term =
+let rec z_of_positive env evd term =
   let head, args = Constr.decompose_app term in
   if ref_matches env head "num.pos.xH" && Array.length args = 0 then Some Z.one
   else if ref_matches env head "num.pos.xO" && Array.length args = 1 then
-    Option.map (fun n -> Z.mul (Z.of_int 2) n) (z_of_positive env args.(0))
+    Option.map
+      (fun n -> Z.mul (Z.of_int 2) n)
+      (z_of_positive env evd args.(0))
   else if ref_matches env head "num.pos.xI" && Array.length args = 1 then
     Option.map
       (fun n -> Z.succ (Z.mul (Z.of_int 2) n))
-      (z_of_positive env args.(0))
-  else None
+      (z_of_positive env evd args.(0))
+  else
+    let reduced =
+      Reductionops.whd_all env evd (EConstr.of_constr term)
+      |> EConstr.Unsafe.to_constr
+    in
+    if Constr.equal reduced term then None
+    else z_of_positive env evd reduced
 
-let z_of_n env term =
+let rec z_of_n env evd term =
   let head, args = Constr.decompose_app term in
   if ref_matches env head "num.N.N0" && Array.length args = 0 then Some Z.zero
   else if ref_matches env head "num.N.Npos" && Array.length args = 1 then
-    z_of_positive env args.(0)
-  else None
+    z_of_positive env evd args.(0)
+  else
+    let reduced =
+      Reductionops.whd_all env evd (EConstr.of_constr term)
+      |> EConstr.Unsafe.to_constr
+    in
+    if Constr.equal reduced term then None else z_of_n env evd reduced
 
 let beta_apply head args =
   let rec apply head index =
@@ -2603,7 +2616,7 @@ let reify_nat env evd term =
               nat_proof =
                 cert_app "lean.NatCertificate_of_N" [ n_int value ];
             })
-          (z_of_n env args.(0))
+          (z_of_n env evd args.(0))
       else if nat_constructor_matches env head 1 && Array.length args = 0 then
         Some
           {
@@ -2872,16 +2885,13 @@ let rec to_constr =
         in
         to_constr env a >>= fun a ->
         to_constr env b_expr >>= fun b ->
-        (match b_expr with
-        | Bound _ ->
-          get_uconv >>= fun uconv ->
-          let b =
-            with_env_evm env uconv
-              (fun env evd () -> maybe_transport_application env evd a b)
-              ()
-          in
-          ret (mkApp (a, [| b |]))
-        | _ -> ret (mkApp (a, [| b |])))
+        get_uconv >>= fun uconv ->
+        let b =
+          with_env_evm env uconv
+            (fun env evd () -> maybe_transport_application env evd a b)
+            ()
+        in
+        ret (mkApp (a, [| b |]))
       in
       match head with
       | Const (n, univs) -> (
