@@ -930,8 +930,56 @@ let declared : instantiation Int.Map.t N.Map.t ref =
 
 let entries : entry N.Map.t ref = Summary.ref ~name:"lean-entries" N.Map.empty
 
+(** Every member points to its complete mutual block.  Keeping this separately
+    from [entries] is necessary when a later SProp universe instance is
+    requested: such an instance must be declared as the same mutual block, not
+    as an isolated inductive. *)
+let mutual_entries : ind list N.Map.t ref =
+  Summary.ref ~name:"lean-mutual-entries" N.Map.empty
+
 let squash_info : squashy N.Map.t ref =
   Summary.ref ~name:"lean-squash-info" N.Map.empty
+
+type translated_mutual_inductive = {
+  source_inductive : ind;
+  translated_arity : Constr.t;
+  constructor_names : N.t list;
+  constructor_types : Constr.t list;
+}
+
+let mutual_group_index names name =
+  let rec find i = function
+    | [] -> None
+    | name' :: names ->
+      if N.equal name name' then Some i else find (i + 1) names
+  in
+  find 0 names
+
+let remap_mutual_constructor ~nparams ~ntypes ~group_names ~current =
+  let rec remap depth = function
+    | Bound k when k = nparams + depth ->
+      Bound (nparams + (ntypes - current - 1) + depth)
+    | Const (name, univs) ->
+      (match mutual_group_index group_names name with
+      | Some target -> Bound (nparams + (ntypes - target - 1) + depth)
+      | None -> Const (name, univs))
+    | (Bound _ | Sort _ | Nat _ | String _) as expr -> expr
+    | App (f, x) -> App (remap depth f, remap depth x)
+    | Let { name; ty; v; rest } ->
+      Let
+        {
+          name;
+          ty = remap depth ty;
+          v = remap depth v;
+          rest = remap (depth + 1) rest;
+        }
+    | Lam (bk, name, ty, body) ->
+      Lam (bk, name, remap depth ty, remap (depth + 1) body)
+    | Pi (bk, name, ty, body) ->
+      Pi (bk, name, remap depth ty, remap (depth + 1) body)
+    | Proj (name, field, c) -> Proj (name, field, remap depth c)
+  in
+  remap 0
 
 let add_declared n i inst =
   declared :=
@@ -1363,12 +1411,17 @@ and ensure_exists n i =
        asking for the inductive type? *)
     (* if i = 0 then CErrors.user_err Pp.(N.pp n ++ str " was not instantiated!"); *)
     (* assert (not (upfront_instances ())); *)
-    (match N.Map.find n !entries with
-    | Def def -> declare_def def i
-    | Ax ax -> declare_ax ax i
-    | Ind ind -> declare_ind ind i
-    | Quot _ -> CErrors.user_err Pp.(str "quot must be predeclared")
-    | exception Not_found -> CErrors.user_err Pp.(str "missing " ++ N.pp n))
+    (match N.Map.find_opt n !mutual_entries with
+    | Some inds ->
+      declare_mutual_inductive_instance inds i;
+      !declared |> N.Map.find n |> Int.Map.find i
+    | None ->
+      (match N.Map.find n !entries with
+      | Def def -> declare_def def i
+      | Ax ax -> declare_ax ax i
+      | Ind ind -> declare_ind ind i
+      | Quot _ -> CErrors.user_err Pp.(str "quot must be predeclared")
+      | exception Not_found -> CErrors.user_err Pp.(str "missing " ++ N.pp n)))
 
 and declare_def { name = n; ty; body; univs; } i =
   let ref, algs =
@@ -1694,7 +1747,7 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
     ~squashy;
   inst
 
-and declare_mutual_inds inds i =
+and declare_mutual_inductive_instance inds i =
   match inds with
   | [] | [ _ ] -> assert false
   | first :: _ ->
@@ -1708,48 +1761,6 @@ and declare_mutual_inds inds i =
       CErrors.user_err
         Pp.(str "Mutual inductives have different parameters or universes");
     let group_names = List.map (fun ind -> ind.name) inds in
-    let group_index name =
-      let rec find i = function
-        | [] -> None
-        | name' :: names ->
-          if N.equal name name' then Some i else find (i + 1) names
-      in
-      find 0 group_names
-    in
-    let rec remap_ctor_self current depth = function
-      | Bound k when k = nparams + depth ->
-        Bound (nparams + (ntypes - current - 1) + depth)
-      | Const (name, univs) ->
-        (match group_index name with
-        | Some target ->
-          Bound (nparams + (ntypes - target - 1) + depth)
-        | None -> Const (name, univs))
-      | (Bound _ | Sort _ | Nat _ | String _) as expr -> expr
-      | App (f, x) ->
-        App (remap_ctor_self current depth f, remap_ctor_self current depth x)
-      | Let { name; ty; v; rest } ->
-        Let
-          {
-            name;
-            ty = remap_ctor_self current depth ty;
-            v = remap_ctor_self current depth v;
-            rest = remap_ctor_self current (depth + 1) rest;
-          }
-      | Lam (bk, name, ty, body) ->
-        Lam
-          ( bk,
-            name,
-            remap_ctor_self current depth ty,
-            remap_ctor_self current (depth + 1) body )
-      | Pi (bk, name, ty, body) ->
-        Pi
-          ( bk,
-            name,
-            remap_ctor_self current depth ty,
-            remap_ctor_self current (depth + 1) body )
-      | Proj (name, field, c) ->
-        Proj (name, field, remap_ctor_self current depth c)
-    in
     let uconv = start_uconv first.univs i in
     let (env_params, uconv), params = to_params uconv first.params in
     let uconv, arities =
@@ -1788,14 +1799,22 @@ and declare_mutual_inds inds i =
           let uconv, ctors =
             CList.fold_left_map
               (fun uconv (ctor_name, ctor_ty) ->
-                let ctor_ty = remap_ctor_self current 0 ctor_ty in
+                let ctor_ty =
+                  remap_mutual_constructor ~nparams ~ntypes ~group_names
+                    ~current ctor_ty
+                in
                 let uconv, ctor_ty = to_constr env_ind_params ctor_ty uconv in
                 uconv, (ctor_name, ctor_ty))
               uconv ind.ctors
           in
           let ctor_names, ctor_types = List.split ctors in
           ( (current + 1, uconv),
-            (ind, ty, ctor_names, ctor_types) ))
+            {
+              source_inductive = ind;
+              translated_arity = ty;
+              constructor_names = ctor_names;
+              constructor_types = ctor_types;
+            } ))
         (0, uconv) arities
     in
     let univs, algs = univ_entry_gen uconv first.univs in
@@ -1806,13 +1825,16 @@ and declare_mutual_inds inds i =
         mind_entry_finite = finite;
         mind_entry_inds =
           List.map
-            (fun (ind, ty, ctor_names, ctor_types) ->
+            (fun packet ->
               {
-                Entries.mind_entry_typename = name_for ind.name i;
-                mind_entry_arity = ty;
+                Entries.mind_entry_typename =
+                  name_for packet.source_inductive.name i;
+                mind_entry_arity = packet.translated_arity;
                 mind_entry_consnames =
-                  List.map (fun name -> name_for name i) ctor_names;
-                mind_entry_lc = ctor_types;
+                  List.map
+                    (fun name -> name_for name i)
+                    packet.constructor_names;
+                mind_entry_lc = packet.constructor_types;
               })
             packets;
         mind_entry_private = None;
@@ -1830,8 +1852,8 @@ and declare_mutual_inds inds i =
       try act Declarations.BiFinite with _ -> act Declarations.Finite
     in
     List.iteri
-      (fun ind_index (ind, _ty, ctor_names, _ctor_types) ->
-        add_declared ind.name i
+      (fun ind_index packet ->
+        add_declared packet.source_inductive.name i
           { ref = GlobRef.IndRef (mind, ind_index); algs };
         List.iteri
           (fun ctor_index ctor_name ->
@@ -1842,10 +1864,11 @@ and declare_mutual_inds inds i =
                     ((mind, ind_index), ctor_index + 1);
                 algs;
               })
-          ctor_names)
+          packet.constructor_names)
       packets;
     List.iteri
-      (fun ind_index (ind, _ty, _ctor_names, _ctor_types) ->
+      (fun ind_index packet ->
+        let ind = packet.source_inductive in
         declare_lean_schemes ~mind ~ind_index ~n:ind.name
           ~ind_name:(name_for ind.name i) ~i ~univs ~algs
           ~squashy:(N.Map.get ind.name !squash_info))
@@ -2017,6 +2040,117 @@ let squashify ind =
   let s = squashify ind in
   squash_info := N.Map.add ind.name s !squash_info
 
+let squashify_mutual inds =
+  match inds with
+  | [] | [ _ ] -> assert false
+  | first :: _ ->
+    let ntypes = List.length inds in
+    let nparams = List.length first.params in
+    let group_names = List.map (fun ind -> ind.name) inds in
+    let context_for_instance i =
+      let uconv = start_uconv first.univs i in
+      let (env_params, uconv), params = to_params uconv first.params in
+      let uconv, arities =
+        CList.fold_left_map
+          (fun uconv ind ->
+            let uconv, ty = to_constr env_params ind.ty uconv in
+            let env =
+              Environ.set_rel_context_val env_params
+                (Environ.set_universes uconv.graph (Global.env ()))
+            in
+            let _, sort = Reduction.dest_arity env ty in
+            uconv, (ind, ty, sort))
+          uconv inds
+      in
+      let env_inds =
+        List.fold_left
+          (fun env (ind, ty, sort) ->
+            Environ.push_rel_context_val
+              (LocalAssum
+                 ( Context.make_annot (N.to_name ind.name)
+                     (Sorts.relevance_of_sort sort),
+                   Term.it_mkProd_or_LetIn ty params ))
+              env)
+          empty_env arities
+      in
+      let env_ind_params =
+        Context.Rel.fold_outside Environ.push_rel_context_val params
+          ~init:env_inds
+      in
+      (uconv, params, arities, env_ind_params)
+    in
+    let uconvP, _, aritiesP, _ =
+      context_for_instance ((1 lsl List.length first.univs) - 1)
+    in
+    let uconvT, paramsT, aritiesT, envT = context_for_instance 0 in
+    let _ = uconvP in
+    CList.iteri
+      (fun current ((ind, _, sortP), (_, _, sortT)) ->
+        let info =
+          if not (Sorts.is_sprop sortP) then noprop
+          else
+            let always_prop = Sorts.is_sprop sortT in
+            if always_prop then
+              { maybe_prop = true; always_prop; lean_squashes = true }
+            else match ind.ctors with
+            | [] -> { maybe_prop = true; always_prop; lean_squashes = false }
+            | _ :: _ :: _ ->
+              { maybe_prop = true; always_prop; lean_squashes = true }
+            | [ (_, ctor) ] ->
+              let ctor =
+                remap_mutual_constructor ~nparams ~ntypes ~group_names
+                  ~current ctor
+              in
+              let uconvT, ctorT = to_constr envT ctor uconvT in
+              let envT =
+                Environ.set_rel_context_val envT
+                  (Environ.set_universes uconvT.graph (Global.env ()))
+              in
+              let args, out = Reduction.whd_decompose_prod envT ctorT in
+              let _, outargs = Constr.decompose_app out in
+              let forced =
+                Array.fold_left
+                  (fun forced arg ->
+                    match Constr.kind arg with
+                    | Rel i -> Int.Set.add i forced
+                    | _ -> forced)
+                  Int.Set.empty outargs
+              in
+              let sigma = Evd.from_env envT in
+              let nargs = List.length args in
+              let lean_squashes, _, _ =
+                Context.Rel.fold_outside
+                  (fun d (squashed, i, env) ->
+                    let recursive =
+                      let first_mutual = nparams + i + 1 in
+                      let rec occurs offset =
+                        offset < ntypes
+                        &&
+                        (not
+                           (Vars.noccurn (first_mutual + offset)
+                              (RelDecl.get_type d))
+                        || occurs (offset + 1))
+                      in
+                      occurs 0
+                    in
+                    let squashed =
+                      squashed
+                      ||
+                      (not (Int.Set.mem (nargs - i) forced)
+                      && not recursive
+                      && not
+                           (EConstr.ESorts.is_sprop sigma
+                              (Retyping.get_sort_of env sigma
+                                 (EConstr.of_constr (RelDecl.get_type d)))))
+                    in
+                    (squashed, i + 1, Environ.push_rel d env))
+                  args ~init:(false, 0, envT)
+              in
+              { maybe_prop = true; always_prop; lean_squashes }
+        in
+        squash_info := N.Map.add ind.name info !squash_info)
+      (List.combine aritiesP aritiesT)
+
 (* pairs of (name * number of univs) *)
 let quots = [ ("", 1); ("mk", 1); ("lift", 2); ("ind", 1) ]
 
@@ -2087,12 +2221,14 @@ let declare_ind ind =
   let () = squashify ind in
   declare_instances (fun i -> ignore (declare_ind ind i)) ind.univs
 
-let declare_mutual_inds inds =
-  List.iter squashify inds;
+let declare_mutual_inductive_group inds =
+  squashify_mutual inds;
   match inds with
   | [] -> assert false
   | first :: _ ->
-    declare_instances (fun i -> declare_mutual_inds inds i) first.univs
+    declare_instances
+      (fun i -> declare_mutual_inductive_instance inds i)
+      first.univs
 
 let entry_name = function
 | Quot name | Def { name } | Ax { name } | Ind { name } -> name
@@ -2108,10 +2244,12 @@ let add_entry entry =
   entries := N.Map.add (entry_name entry) entry !entries
 
 let add_mutual_entries inds =
-  declare_mutual_inds inds;
   List.iter
-    (fun ind -> entries := N.Map.add ind.name (Ind ind) !entries)
-    inds
+    (fun ind ->
+      entries := N.Map.add ind.name (Ind ind) !entries;
+      mutual_entries := N.Map.add ind.name inds !mutual_entries)
+    inds;
+  declare_mutual_inductive_group inds
 
 let rec is_arity = function
   | Sort _ -> true
@@ -2126,6 +2264,12 @@ let { Goptions.get = print_squashes } =
 type input_state = {
   pstate : LeanParse.parsing_state;
   skips : int;
+}
+
+type pending_inductive_group = {
+  first_line : int;
+  first_raw : string;
+  members_rev : ind list;
 }
 
 let finish state =
@@ -2252,9 +2396,13 @@ let process_effect state ch ~line_no ~raw ~name act =
 
 let process_pending state ch = function
   | None -> Some state
-  | Some (line_no, raw, inds) ->
-    let first = List.hd inds in
-    process_effect state ch ~line_no ~raw ~name:first.name (fun () ->
+  | Some { first_line; first_raw; members_rev } ->
+    let inds = List.rev members_rev in
+    let first =
+      match inds with first :: _ -> first | [] -> assert false
+    in
+    process_effect state ch ~line_no:first_line ~raw:first_raw
+      ~name:first.name (fun () ->
         match inds with
         | [ ind ] -> add_entry (Ind ind)
         | _ -> add_mutual_entries inds)
@@ -2289,9 +2437,15 @@ let rec do_input_pending state ~from ~until ~pending ch =
       | false, Some (Entry (Ind ind)) ->
         let pending =
           match pending with
-          | None -> Some (!lcnt, line, [ ind ])
-          | Some (line_no, raw, inds) ->
-            Some (line_no, raw, inds @ [ ind ])
+          | None ->
+            Some
+              {
+                first_line = !lcnt;
+                first_raw = line;
+                members_rev = [ ind ];
+              }
+          | Some pending ->
+            Some { pending with members_rev = ind :: pending.members_rev }
         in
         incr lcnt;
         do_input_pending state ~from ~until ~pending ch
@@ -2318,11 +2472,19 @@ let do_input state ~from ~until ch =
 let pstate = Summary.ref ~name:"lean-parse-state" LeanParse.empty_state
 
 let lean_obj =
-  let cache (pstatev, setsv, declaredv, entriesv, squash_infov, heightv) =
+  let cache
+      ( pstatev,
+        setsv,
+        declaredv,
+        entriesv,
+        mutual_entriesv,
+        squash_infov,
+        heightv ) =
     pstate := pstatev;
     sets := setsv;
     declared := declaredv;
     entries := entriesv;
+    mutual_entries := mutual_entriesv;
     squash_info := squash_infov;
     height_cache := heightv;
     ()
@@ -2343,4 +2505,12 @@ let import ~from ~until f =
     Flags.silently (fun () ->
         do_input { pstate = !pstate; skips = 0 } ~from ~until (open_in f)) ()
   in
-  Lib.add_leaf (lean_obj (pstatev, !sets, !declared, !entries, !squash_info, !height_cache))
+  Lib.add_leaf
+    (lean_obj
+       ( pstatev,
+         !sets,
+         !declared,
+         !entries,
+         !mutual_entries,
+         !squash_info,
+         !height_cache ))
