@@ -2970,67 +2970,22 @@ let reify_bool env evd term =
                   (reify_nat env evd args.(1)))
           else None
         in
-        match
-          comparison "lean.Nat_beq" "lean.NatCertificate_beq" Z.equal
-        with
+        let reflected =
+          List.find_map
+            (fun (key, proof_key, compare) ->
+              comparison key proof_key compare)
+            [
+              ("lean.Nat_beq", "lean.NatCertificate_beq", Z.equal);
+              ("lean.Nat_ble", "lean.NatCertificate_ble", Z.leq);
+              ("lean.Nat_blt", "lean.NatCertificate_blt", Z.lt);
+            ]
+        in
+        match reflected with
         | Some _ as result -> result
-        | None -> (
-          match
-            comparison "lean.Nat_ble" "lean.NatCertificate_ble" Z.leq
-          with
-          | Some _ as result -> result
-          | None -> (
-            match
-              comparison "lean.Nat_blt" "lean.NatCertificate_blt" Z.lt
-            with
-            | Some _ as result -> result
-            | None ->
-              let reduced =
-                expose_iota_scrutinee env term |> EConstr.of_constr
-                |> Reductionops.whd_betaiotazeta env evd
-                |> EConstr.Unsafe.to_constr
-              in
-              if not (Constr.equal reduced term) then
-                preserve_original (reify (fuel - 1) unfolded reduced)
-              else
-                match Constr.kind term with
-                | LetIn (_, value, _, body) ->
-                  preserve_original
-                    (reify (fuel - 1) unfolded (Vars.subst1 value body))
-                | Const (constant, instance)
-                  when not
-                         (List.exists
-                            (fun seen ->
-                              Environ.QConstant.equal env constant seen)
-                            unfolded) -> (
-                  try
-                    let body =
-                      Environ.constant_value_in env (constant, instance)
-                    in
-                    preserve_original
-                      (reify (fuel - 1) (constant :: unfolded) body)
-                  with Environ.NotEvaluableConst _ -> None)
-                | App _ -> (
-                  match Constr.kind head with
-                  | Const (constant, instance)
-                    when not
-                           (List.exists
-                              (fun seen ->
-                                Environ.QConstant.equal env constant seen)
-                              unfolded) -> (
-                    try
-                      let body =
-                        Environ.constant_value_in env (constant, instance)
-                      in
-                      preserve_original
-                        (reify (fuel - 1) (constant :: unfolded)
-                           (beta_apply body args))
-                    with Environ.NotEvaluableConst _ -> None)
-                  | Lambda _ | LetIn _ ->
-                    preserve_original
-                      (reify (fuel - 1) unfolded (beta_apply head args))
-                  | _ -> None)
-                | _ -> None))
+        | None ->
+          Option.bind (reduce_closed_term_once env evd unfolded term)
+            (fun (unfolded, reduced) ->
+              preserve_original (reify (fuel - 1) unfolded reduced))
   in
   reify 128 [] term
 
