@@ -2912,6 +2912,128 @@ let reify_nat env evd term =
   in
   reify 128 [] term
 
+type bool_certificate = {
+  bool_term : Constr.t;
+  bool_value : bool;
+  bool_proof : Constr.t;
+}
+
+let bool_constructor_matches env term index =
+  match Rocqlib.lib_ref "lean.Bool", Constr.kind term with
+  | GlobRef.IndRef ind, Construct ((constructor_ind, constructor_index), _) ->
+    index = constructor_index && Environ.QInd.equal env ind constructor_ind
+  | _ -> false
+
+let rocq_bool value =
+  registered_ref (if value then "core.bool.true" else "core.bool.false")
+
+let reify_bool env evd term =
+  let rec reify fuel unfolded term =
+    let preserve_original result =
+      Option.map
+        (fun certificate -> { certificate with bool_term = term })
+        result
+    in
+    let certified value proof =
+      Some { bool_term = term; bool_value = value; bool_proof = proof }
+    in
+    if fuel = 0 || not (Vars.closed0 term) then None
+    else
+      let head, args = Constr.decompose_app term in
+      if bool_constructor_matches env head 1 && Array.length args = 0 then
+        certified false
+          (cert_app "lean.BoolCertificate_of_bool" [ rocq_bool false ])
+      else if bool_constructor_matches env head 2 && Array.length args = 0 then
+        certified true
+          (cert_app "lean.BoolCertificate_of_bool" [ rocq_bool true ])
+      else
+        let comparison key proof_key compare =
+          if ref_matches env head key && Array.length args = 2 then
+            Option.bind (reify_nat env evd args.(0)) (fun left ->
+                Option.map
+                  (fun right ->
+                    let value = compare left.nat_value right.nat_value in
+                    {
+                      bool_term = term;
+                      bool_value = value;
+                      bool_proof =
+                        cert_app proof_key
+                          [
+                            left.nat_term;
+                            right.nat_term;
+                            n_int left.nat_value;
+                            n_int right.nat_value;
+                            left.nat_proof;
+                            right.nat_proof;
+                          ];
+                    })
+                  (reify_nat env evd args.(1)))
+          else None
+        in
+        match
+          comparison "lean.Nat_beq" "lean.NatCertificate_beq" Z.equal
+        with
+        | Some _ as result -> result
+        | None -> (
+          match
+            comparison "lean.Nat_ble" "lean.NatCertificate_ble" Z.leq
+          with
+          | Some _ as result -> result
+          | None -> (
+            match
+              comparison "lean.Nat_blt" "lean.NatCertificate_blt" Z.lt
+            with
+            | Some _ as result -> result
+            | None ->
+              let reduced =
+                expose_iota_scrutinee env term |> EConstr.of_constr
+                |> Reductionops.whd_betaiotazeta env evd
+                |> EConstr.Unsafe.to_constr
+              in
+              if not (Constr.equal reduced term) then
+                preserve_original (reify (fuel - 1) unfolded reduced)
+              else
+                match Constr.kind term with
+                | LetIn (_, value, _, body) ->
+                  preserve_original
+                    (reify (fuel - 1) unfolded (Vars.subst1 value body))
+                | Const (constant, instance)
+                  when not
+                         (List.exists
+                            (fun seen ->
+                              Environ.QConstant.equal env constant seen)
+                            unfolded) -> (
+                  try
+                    let body =
+                      Environ.constant_value_in env (constant, instance)
+                    in
+                    preserve_original
+                      (reify (fuel - 1) (constant :: unfolded) body)
+                  with Environ.NotEvaluableConst _ -> None)
+                | App _ -> (
+                  match Constr.kind head with
+                  | Const (constant, instance)
+                    when not
+                           (List.exists
+                              (fun seen ->
+                                Environ.QConstant.equal env constant seen)
+                              unfolded) -> (
+                    try
+                      let body =
+                        Environ.constant_value_in env (constant, instance)
+                      in
+                      preserve_original
+                        (reify (fuel - 1) (constant :: unfolded)
+                           (beta_apply body args))
+                    with Environ.NotEvaluableConst _ -> None)
+                  | Lambda _ | LetIn _ ->
+                    preserve_original
+                      (reify (fuel - 1) unfolded (beta_apply head args))
+                  | _ -> None)
+                | _ -> None))
+  in
+  reify 128 [] term
+
 type certificate_path_step =
   | AppArgument of int
   | ProdDomain
@@ -2922,50 +3044,51 @@ type certificate_path_step =
   | LetType
   | LetBody
 
-let rec first_certified_nat_difference env evd path actual expected =
+let rec first_certified_difference reify equivalent env evd path actual
+    expected =
   if Constr.equal actual expected then None
   else
-    match reify_nat env evd actual, reify_nat env evd expected with
-    | Some left, Some right when Z.equal left.nat_value right.nat_value ->
+    match reify env evd actual, reify env evd expected with
+    | Some left, Some right when equivalent left right ->
       Some (List.rev path, left, right)
     | _ -> (
       match Constr.kind actual, Constr.kind expected with
       | Prod (_, actual_domain, actual_body),
         Prod (_, expected_domain, expected_body) -> (
         match
-          first_certified_nat_difference env evd (ProdDomain :: path)
-            actual_domain expected_domain
+          first_certified_difference reify equivalent env evd
+            (ProdDomain :: path) actual_domain expected_domain
         with
         | Some _ as result -> result
         | None ->
-          first_certified_nat_difference env evd (ProdCodomain :: path)
-            actual_body expected_body)
+          first_certified_difference reify equivalent env evd
+            (ProdCodomain :: path) actual_body expected_body)
       | Lambda (_, actual_domain, actual_body),
         Lambda (_, expected_domain, expected_body) -> (
         match
-          first_certified_nat_difference env evd (LambdaDomain :: path)
-            actual_domain expected_domain
+          first_certified_difference reify equivalent env evd
+            (LambdaDomain :: path) actual_domain expected_domain
         with
         | Some _ as result -> result
         | None ->
-          first_certified_nat_difference env evd (LambdaBody :: path)
-            actual_body expected_body)
+          first_certified_difference reify equivalent env evd
+            (LambdaBody :: path) actual_body expected_body)
       | LetIn (_, actual_value, actual_type, actual_body),
         LetIn (_, expected_value, expected_type, expected_body) -> (
         match
-          first_certified_nat_difference env evd (LetValue :: path) actual_value
-            expected_value
+          first_certified_difference reify equivalent env evd
+            (LetValue :: path) actual_value expected_value
         with
         | Some _ as result -> result
         | None -> (
           match
-            first_certified_nat_difference env evd (LetType :: path) actual_type
-              expected_type
+            first_certified_difference reify equivalent env evd
+              (LetType :: path) actual_type expected_type
           with
           | Some _ as result -> result
           | None ->
-            first_certified_nat_difference env evd (LetBody :: path) actual_body
-              expected_body))
+            first_certified_difference reify equivalent env evd
+              (LetBody :: path) actual_body expected_body))
       | App _, App _ ->
         let actual_head, actual_args = Constr.decompose_app actual in
         let expected_head, expected_args = Constr.decompose_app expected in
@@ -2978,7 +3101,7 @@ let rec first_certified_nat_difference env evd path actual expected =
             if index = Array.length actual_args then None
             else
               match
-                first_certified_nat_difference env evd
+                first_certified_difference reify equivalent env evd
                   (AppArgument index :: path)
                   actual_args.(index) expected_args.(index)
               with
@@ -3028,15 +3151,34 @@ let is_sprop_type env evd ty =
   in
   match Constr.kind sort with Sort sort -> Sorts.is_sprop sort | _ -> false
 
-let transport_closed_nat env evd actual expected argument =
+let transport_closed_values env evd actual expected argument =
   if not (is_sprop_type env evd actual) then None
   else
     let rec transport fuel actual argument =
       if Constr.equal actual expected then Some argument
       else if fuel = 0 then None
       else
-        match first_certified_nat_difference env evd [] actual expected with
-        | None -> None
+        let continue path value_type transport_key left right equality =
+          let motive_body =
+            replace_certificate_path (Vars.lift 1 actual) path (Constr.mkRel 1)
+          in
+          let motive =
+            Constr.mkLambda
+              ( Context.make_annot Anonymous Sorts.Relevant,
+                registered_ref value_type,
+                motive_body )
+          in
+          let argument =
+            cert_app transport_key [ motive; left; right; equality; argument ]
+          in
+          let actual = replace_certificate_path actual path right in
+          transport (fuel - 1) actual argument
+        in
+        match
+          first_certified_difference reify_nat
+            (fun left right -> Z.equal left.nat_value right.nat_value)
+            env evd [] actual expected
+        with
         | Some (path, left, right) ->
           let canonical = n_int left.nat_value in
           let equality =
@@ -3049,21 +3191,29 @@ let transport_closed_nat env evd actual expected argument =
                 right.nat_proof;
               ]
           in
-          let motive_body =
-            replace_certificate_path (Vars.lift 1 actual) path (Constr.mkRel 1)
-          in
-          let motive =
-            Constr.mkLambda
-              ( Context.make_annot Anonymous Sorts.Relevant,
-                registered_ref "lean.Nat",
-                motive_body )
-          in
-          let argument =
-            cert_app "lean.Nat_transport_sprop"
-              [ motive; left.nat_term; right.nat_term; equality; argument ]
-          in
-          let actual = replace_certificate_path actual path right.nat_term in
-          transport (fuel - 1) actual argument
+          continue path "lean.Nat" "lean.Nat_transport_sprop" left.nat_term
+            right.nat_term equality
+        | None -> (
+          match
+            first_certified_difference reify_bool
+              (fun left right -> Bool.equal left.bool_value right.bool_value)
+              env evd [] actual expected
+          with
+          | Some (path, left, right) ->
+            let canonical = rocq_bool left.bool_value in
+            let equality =
+              cert_app "lean.BoolCertificate_equal"
+                [
+                  left.bool_term;
+                  right.bool_term;
+                  canonical;
+                  left.bool_proof;
+                  right.bool_proof;
+                ]
+            in
+            continue path "lean.Bool" "lean.Bool_transport_sprop"
+              left.bool_term right.bool_term equality
+          | None -> None)
     in
     transport 16 actual argument
 
@@ -3074,7 +3224,7 @@ let maybe_transport_to_expected env evd expected argument =
   in
   if Constr.equal actual expected then argument
   else
-    match transport_closed_nat env evd actual expected argument with
+    match transport_closed_values env evd actual expected argument with
     | Some argument -> argument
     | None -> argument
 

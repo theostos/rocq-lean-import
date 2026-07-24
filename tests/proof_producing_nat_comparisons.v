@@ -30,3 +30,10 @@ Proof.
     (N.leb 100000000 99999999)).
   apply NatCertificate_ble; apply NatCertificate_of_N.
 Qed.
+
+(* Exercise the importer path: the source proof is reused across two closed
+   comparisons that both evaluate to [true], but are not syntactically equal. *)
+Set Lean Line Timeout 10.
+Lean Import "../dumps/proof_producing_nat_comparisons".
+
+Check castComparison.

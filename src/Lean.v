@@ -584,6 +584,12 @@ Proof.
   reflexivity.
 Qed.
 
+Definition Bool_transport_sprop (P : Bool -> SProp)
+    (a b : Bool) (e : eq a b) (x : P a) : P b :=
+  match e in eq _ b return P b with
+  | eq_refl _ => x
+  end.
+
 Definition Nat_transport_sprop (P : Nat -> SProp)
     (a b : Nat) (e : eq a b) (x : P a) : P b :=
   match e in eq _ b return P b with
@@ -607,6 +613,7 @@ Register BoolCertificate_equal as lean.BoolCertificate_equal.
 Register NatCertificate_beq as lean.NatCertificate_beq.
 Register NatCertificate_ble as lean.NatCertificate_ble.
 Register NatCertificate_blt as lean.NatCertificate_blt.
+Register Bool_transport_sprop as lean.Bool_transport_sprop.
 
 #[local] Set Warnings "-abstract-large-number".
 Definition UInt32_size : Nat := 0x100000000%Nat.
