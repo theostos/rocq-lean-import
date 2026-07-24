@@ -699,6 +699,7 @@ Definition Nat_transport_sprop (P : Nat -> SProp)
 
 Register NatCertificate as lean.NatCertificate.
 Register NatCertificate_zero as lean.NatCertificate_zero.
+Register NatCertificate_of_N as lean.NatCertificate_of_N.eager.
 Register NatCertificate_CompactNat as lean.NatCertificate_of_N.
 Register NatCertificate_succ as lean.NatCertificate_succ.
 Register NatCertificate_add as lean.NatCertificate_add.
@@ -715,6 +716,7 @@ Register NatCertificate_beq as lean.NatCertificate_beq.
 Register NatCertificate_ble as lean.NatCertificate_ble.
 Register NatCertificate_blt as lean.NatCertificate_blt.
 Register Bool_transport_sprop as lean.Bool_transport_sprop.
+Register Nat_of_N as lean.Nat_of_N.eager.
 Register CompactNat as lean.Nat_of_N.
 
 #[local] Set Warnings "-abstract-large-number".

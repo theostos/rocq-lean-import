@@ -1220,6 +1220,11 @@ let one_more_int nat =
 
 let max_nat_int = Z.of_string "5000"
 
+(** Compact decoding avoids large unary intermediates, but its nested doubling
+    terms add conversion depth for medium literals.  Keep the existing eager
+    decoder below 2^21 and switch before values reach 32-bit-scale bounds. *)
+let compact_nat_min = Z.shift_left Z.one 21
+
 let registered_ref key =
   Constr.mkRef (Rocqlib.lib_ref key, UVars.Instance.empty)
 
@@ -1240,9 +1245,11 @@ let n_int i =
   else
     Constr.mkApp (registered_ref "num.N.Npos", [| positive_int i |])
 
-let nat_int nat nat_of_n i =
+let nat_int nat nat_of_n eager_nat_of_n i =
   assert (Z.leq Z.zero i);
-  if Z.leq max_nat_int i then Constr.mkApp (nat_of_n, [| n_int i |])
+  if Z.leq compact_nat_min i then Constr.mkApp (nat_of_n, [| n_int i |])
+  else if Z.leq max_nat_int i then
+    Constr.mkApp (eager_nat_of_n, [| n_int i |])
   else begin
     while Z.lt !max_known_int i do
       one_more_int nat
@@ -2759,14 +2766,23 @@ let reify_nat env evd term =
     if fuel = 0 || not (Vars.closed0 term) then None
     else
       let head, args = Constr.decompose_app term in
-      if ref_matches env head "lean.Nat_of_N" && Array.length args = 1 then
+      if
+        (ref_matches env head "lean.Nat_of_N"
+        || ref_matches env head "lean.Nat_of_N.eager")
+        && Array.length args = 1
+      then
+        let proof_key =
+          if ref_matches env head "lean.Nat_of_N" then
+            "lean.NatCertificate_of_N"
+          else "lean.NatCertificate_of_N.eager"
+        in
         Option.map
           (fun value ->
             {
               nat_term = term;
               nat_value = value;
               nat_proof =
-                cert_app "lean.NatCertificate_of_N" [ n_int value ];
+                cert_app proof_key [ n_int value ];
             })
           (z_of_n env evd args.(0))
       else if nat_constructor_matches env head 1 && Array.length args = 0 then
@@ -3307,7 +3323,17 @@ let rec to_constr =
             EConstr.to_constr evd p)
           ()
       in
-      ret (nat_int nat nat_of_n i)
+      let eager_nat_of_n =
+        with_env_evm env uconv
+          (fun env evd () ->
+            let _, term =
+              Evd.fresh_global env evd
+                (Rocqlib.lib_ref "lean.Nat_of_N.eager")
+            in
+            EConstr.to_constr evd term)
+          ()
+      in
+      ret (nat_int nat nat_of_n eager_nat_of_n i)
     | String s ->
       (* instantiate (N.append N.anon "Char") [] >>= fun char -> *)
       (* let (_, charu) = Constr.destInd char in *)
