@@ -1241,8 +1241,6 @@ let nested_array_rec_info : nested_array_rec_info N.Map.t ref =
 
 let append_array a b = Array.append a b
 
-
-
 let extended_all_uctx source_uctx =
   let source_inst = UContext.instance source_uctx in
   let source_names = UContext.names source_uctx in
@@ -1255,8 +1253,14 @@ let extended_all_uctx source_uctx =
       univs = append_array source_names.univs [| Name (Id.of_string "motive") |];
     }
   in
-  let inst = Instance.of_array (append_array qinst [| q |], append_array uinst [| u |]) in
-  (UContext.make names (inst, UContext.constraints source_uctx), source_inst, q, u)
+  let inst =
+    Instance.of_array
+      (append_array qinst [| q |], append_array uinst [| u |])
+  in
+  ( UContext.make names (inst, UContext.constraints source_uctx),
+    source_inst,
+    q,
+    u )
 
 let qsort q u = Constr.mkSort (Sorts.make q u)
 
@@ -1631,7 +1635,7 @@ let nested_list_fold env evd ~depth ~motive_list ~nil_case ~cons_case
   in
   (list, folded)
 
-let nested_array_fold env evd ~depth ~motive_list ~array_case ~nil_case
+let fold_array_all_proof env evd ~depth ~motive_list ~array_case ~nil_case
     ~cons_case ~prod_case ~all_inst ~all_ind ~all_args =
   let list, folded =
     nested_list_fold env evd ~depth ~motive_list ~nil_case ~cons_case
@@ -1639,7 +1643,7 @@ let nested_array_fold env evd ~depth ~motive_list ~array_case ~nil_case
   in
   constr_app (Vars.lift depth array_case) [ list; folded ]
 
-let adapt_nested_array_branch env evd ~motive_list ~array_case ~nil_case
+let adapt_nested_branch env evd ~motive_list ~array_case ~nil_case
     ~cons_case ~prod_case branch_ty branch =
   let rec loop env depth ty mapped =
     let ty = whd_constr env evd ty in
@@ -1657,7 +1661,7 @@ let adapt_nested_array_branch env evd ~motive_list ~array_case ~nil_case
         | None -> Constr.mkRel 1
         | Some (all_ind, all_inst, all_args) ->
           let all_args = Array.map (Vars.lift 1) all_args in
-          nested_array_fold env' evd ~depth:(depth + 1) ~motive_list
+          fold_array_all_proof env' evd ~depth:(depth + 1) ~motive_list
             ~array_case ~nil_case ~cons_case ~prod_case ~all_inst ~all_ind
             ~all_args
       in
@@ -1727,6 +1731,18 @@ let prod_parts env evd prod =
   ( Constr.mkProj (Projection.make fst_p false, fst_r, prod),
     Constr.mkProj (Projection.make snd_p false, snd_r, prod) )
 
+let take_recursor_argument label = function
+  | argument :: rest -> (argument, rest)
+  | [] ->
+    CErrors.user_err
+      Pp.(str "Nested recursor is missing its " ++ str label ++ str " argument")
+
+(** Lean exports a recursor for each nested layer (the main inductive, Array,
+    List, and sometimes Prod). Rocq 9.3 can generate the structural recursion
+    once Array and Prod expose [All]/[AllForall] schemes. The adapter below
+    consumes Lean's extra motives and cases, adapts the main constructor
+    branches to Rocq's generated scheme, and derives the auxiliary recursors
+    from that single kernel-checked definition. *)
 let adapt_nested_array_recursor env evd info recursor args =
   let nctors = info.nctors in
   let nmotives, ncontainer_cases =
@@ -1736,24 +1752,28 @@ let adapt_nested_array_recursor env evd info recursor args =
   if List.length args < needed then None
   else
     let params, args = CList.chop info.nparams args in
-    let motive, args = (List.hd args, List.tl args) in
-    let motive_array, args = (List.hd args, List.tl args) in
-    let motive_list, args = (List.hd args, List.tl args) in
-    let motive_prod, args =
+    let motive, args = take_recursor_argument "main motive" args in
+    let _motive_array, args = take_recursor_argument "Array motive" args in
+    let motive_list, args = take_recursor_argument "List motive" args in
+    let _motive_prod, args =
       match info.shape with
       | ArraySelf -> (None, args)
-      | ArrayProdSecond -> (Some (List.hd args), List.tl args)
+      | ArrayProdSecond ->
+        let motive, args = take_recursor_argument "Prod motive" args in
+        (Some motive, args)
     in
     let branches, args = CList.chop nctors args in
-    let array_case, args = (List.hd args, List.tl args) in
-    let nil_case, args = (List.hd args, List.tl args) in
-    let cons_case, args = (List.hd args, List.tl args) in
+    let array_case, args = take_recursor_argument "Array case" args in
+    let nil_case, args = take_recursor_argument "List.nil case" args in
+    let cons_case, args = take_recursor_argument "List.cons case" args in
     let prod_case, args =
       match info.shape with
       | ArraySelf -> (None, args)
-      | ArrayProdSecond -> (Some (List.hd args), List.tl args)
+      | ArrayProdSecond ->
+        let case, args = take_recursor_argument "Prod case" args in
+        (Some case, args)
     in
-    let target, extra = (List.hd args, List.tl args) in
+    let target, extra = take_recursor_argument "target" args in
     let rec_ty =
       EConstr.Unsafe.to_constr
         (Retyping.get_type_of env evd (EConstr.of_constr recursor))
@@ -1767,7 +1787,7 @@ let adapt_nested_array_recursor env evd info recursor args =
         (fun rec_ty branch ->
           let branch_ty = prod_domain env evd rec_ty in
           let branch =
-            adapt_nested_array_branch env evd ~motive_list ~array_case
+            adapt_nested_branch env evd ~motive_list ~array_case
               ~nil_case ~cons_case ~prod_case branch_ty branch
           in
           (prod_after_apply env evd rec_ty branch, branch))
@@ -1841,13 +1861,11 @@ let adapt_nested_array_recursor env evd info recursor args =
           | FocusList -> folded
           | FocusMain | FocusProd -> assert false
         in
-        let _ = motive_array in
         constr_app result extra
       | FocusProd ->
         let prod_case = Option.get prod_case in
         let fst, snd = prod_parts env evd target in
         let result = constr_app prod_case [ fst; snd; constr_app main_rec [ snd ] ] in
-        let _ = motive_prod in
         constr_app result extra
     in
     Some adapted
