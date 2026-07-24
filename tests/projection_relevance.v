@@ -5,6 +5,6 @@ From LeanImport Require Import Lean.
    from the projected field rather than from the structure. *)
 Lean Import "../dumps/projection_relevance".
 
-Check DepRec_proposition.
-Check DepRec_proof.
-Check DepRec_getProof.
+Check DepRec_proposition : DepRec -> SProp.
+Check DepRec_proof : forall r, DepRec_proposition r.
+Check DepRec_getProof : forall r, DepRec_proposition r.
