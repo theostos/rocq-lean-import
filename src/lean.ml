@@ -1690,91 +1690,8 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
       cnames
   in
 
-  (* elim *)
-  let make_scheme fam =
-    let u =
-      if fam = SchemeSProp then LSProp
-      else
-        let u =
-          if lean_fancy_univs () then
-            let u = DirPath.make [ Id.of_string "motive"; lean_id ] in
-            Level.(make (UGlobal.make u "" 0))
-          else UnivGen.fresh_level ()
-        in
-        Level u
-    in
-    let env = Environ.push_context ~strict:true univs (Global.env ()) in
-    let env =
-      match u with
-      | LSProp -> env
-      | Level u ->
-        Environ.push_context_set ~strict:false (Univ.ContextSet.singleton u) env
-    in
-    let inst, uentry =
-      let inst = UContext.instance univs in
-      let csts = UContext.constraints univs in
-      let { quals = qnames; univs = unames} = UContext.names univs in
-      let uentry =
-        match u with
-        | LSProp -> UState.Polymorphic_entry univs
-        | Level u ->
-          UState.Polymorphic_entry
-            (UContext.make
-               {quals = qnames; univs = Array.append [| Name (Id.of_string "motive") |] unames}
-               ( Instance.of_array
-                   ([||], Array.append [| u |] (snd (Instance.to_array inst))),
-                 csts ))
-      in
-      (inst, uentry)
-    in
-    (* lean 4 change: always dep? was not squashy.always_prop*)
-    (lean_scheme env ~dep:true (mind, 0) inst u, uentry)
-  in
-  let nrec = N.append n "rec" in
-  let elims =
-    if squashy.lean_squashes then [ ("_indl", SchemeSProp) ]
-    else [ ("_recl", SchemeType); ("_indl", SchemeSProp) ]
-  in
-
-  let declare_one_scheme (suffix, sort) =
-    let id = Id.of_string (Id.to_string ind_name ^ suffix) in
-    let body, uentry = make_scheme sort in
-    let elim =
-      quickdef ~name:id ~types:None
-        ~univs:(uentry, UnivNames.empty_binders)
-        body
-      (* TODO implicits? *)
-    in
-    (* TODO AFAICT Lean reduces recursors eagerly, but ofc only when applied to a ctor
-       Can we simulate that with strategy better than by leaving them at the default strat? *)
-    let liftu l =
-      let u =
-        match Level.var_index l with
-        | None -> Universe.make l (* Set *)
-        | Some i -> Universe.make (Level.var (i + 1))
-      in
-      Some u
-    in
-    let algs =
-      if sort = SchemeSProp then algs
-      else universe_var 0 :: List.map (UnivSubst.subst_univs_universe liftu) algs
-    in
-    let elim = { ref = elim; algs } in
-    let j =
-      if squashy.lean_squashes then i
-      else if sort == SchemeType then 2 * i
-      else (2 * i) + 1
-    in
-    add_declared nrec j elim
-  in
-  let () =
-    List.iter
-      (fun x ->
-        try declare_one_scheme x
-        with e when CErrors.noncritical e && error_mode e = Skip ->
-          Feedback.msg_info Pp.(str "Skipping scheme"))
-      elims
-  in
+  declare_lean_schemes ~mind ~ind_index:0 ~n ~ind_name ~i ~univs ~algs
+    ~squashy;
   inst
 
 and declare_mutual_inds inds i =
@@ -1802,10 +1719,12 @@ and declare_mutual_inds inds i =
     let rec remap_ctor_self current depth = function
       | Bound k when k = nparams + depth ->
         Bound (nparams + (ntypes - current - 1) + depth)
-      | Const (name, _) when Option.has_some (group_index name) ->
-        let target = Option.get (group_index name) in
-        Bound (nparams + (ntypes - target - 1) + depth)
-      | (Const _ | Bound _ | Sort _ | Nat _ | String _) as expr -> expr
+      | Const (name, univs) ->
+        (match group_index name with
+        | Some target ->
+          Bound (nparams + (ntypes - target - 1) + depth)
+        | None -> Const (name, univs))
+      | (Bound _ | Sort _ | Nat _ | String _) as expr -> expr
       | App (f, x) ->
         App (remap_ctor_self current depth f, remap_ctor_self current depth x)
       | Let { name; ty; v; rest } ->
@@ -1925,85 +1844,94 @@ and declare_mutual_inds inds i =
               })
           ctor_names)
       packets;
-    let make_scheme ind_index fam =
-      let u =
-        if fam = SchemeSProp then LSProp
-        else
-          let u =
-            if lean_fancy_univs () then
-              let u = DirPath.make [ Id.of_string "motive"; lean_id ] in
-              Level.(make (UGlobal.make u "" 0))
-            else UnivGen.fresh_level ()
-          in
-          Level u
-      in
-      let env = Environ.push_context ~strict:true univs (Global.env ()) in
-      let env =
-        match u with
-        | LSProp -> env
-        | Level u ->
-          Environ.push_context_set ~strict:false
-            (Univ.ContextSet.singleton u) env
-      in
-      let inst = UContext.instance univs in
-      let csts = UContext.constraints univs in
-      let { quals = qnames; univs = unames } = UContext.names univs in
-      let uentry =
-        match u with
-        | LSProp -> UState.Polymorphic_entry univs
-        | Level u ->
-          UState.Polymorphic_entry
-            (UContext.make
-               {
-                 quals = qnames;
-                 univs =
-                   Array.append [| Name (Id.of_string "motive") |] unames;
-               }
-               ( Instance.of_array
-                   ([||], Array.append [| u |] (snd (Instance.to_array inst))),
-                 csts ))
-      in
-      lean_scheme env ~dep:true (mind, ind_index) inst u, uentry
-    in
     List.iteri
       (fun ind_index (ind, _ty, _ctor_names, _ctor_types) ->
-        let squashy = N.Map.get ind.name !squash_info in
-        let elims =
-          if squashy.lean_squashes then [ "_indl", SchemeSProp ]
-          else [ "_recl", SchemeType; "_indl", SchemeSProp ]
-        in
-        List.iter
-          (fun (suffix, sort) ->
-            let ind_name = name_for ind.name i in
-            let id = Id.of_string (Id.to_string ind_name ^ suffix) in
-            let body, uentry = make_scheme ind_index sort in
-            let elim =
-              quickdef ~name:id ~types:None
-                ~univs:(uentry, UnivNames.empty_binders) body
-            in
-            let liftu l =
-              let u =
-                match Level.var_index l with
-                | None -> Universe.make l
-                | Some j -> Universe.make (Level.var (j + 1))
-              in
-              Some u
-            in
-            let scheme_algs =
-              if sort = SchemeSProp then algs
-              else
-                universe_var 0
-                :: List.map (UnivSubst.subst_univs_universe liftu) algs
-            in
-            let instance = { ref = elim; algs = scheme_algs } in
-            let scheme_index =
-              if squashy.lean_squashes then i
-              else if sort = SchemeType then 2 * i
-              else (2 * i) + 1
-            in
-            add_declared (N.append ind.name "rec") scheme_index instance)
-          elims)
+        declare_lean_schemes ~mind ~ind_index ~n:ind.name
+          ~ind_name:(name_for ind.name i) ~i ~univs ~algs
+          ~squashy:(N.Map.get ind.name !squash_info))
       packets
+
+and declare_lean_schemes ~mind ~ind_index ~n ~ind_name ~i ~univs ~algs
+    ~squashy =
+  let make_scheme fam =
+    let u =
+      if fam = SchemeSProp then LSProp
+      else
+        let u =
+          if lean_fancy_univs () then
+            let u = DirPath.make [ Id.of_string "motive"; lean_id ] in
+            Level.(make (UGlobal.make u "" 0))
+          else UnivGen.fresh_level ()
+        in
+        Level u
+    in
+    let env = Environ.push_context ~strict:true univs (Global.env ()) in
+    let env =
+      match u with
+      | LSProp -> env
+      | Level u ->
+        Environ.push_context_set ~strict:false
+          (Univ.ContextSet.singleton u) env
+    in
+    let inst = UContext.instance univs in
+    let csts = UContext.constraints univs in
+    let { quals = qnames; univs = unames } = UContext.names univs in
+    let uentry =
+      match u with
+      | LSProp -> UState.Polymorphic_entry univs
+      | Level u ->
+        UState.Polymorphic_entry
+          (UContext.make
+             {
+               quals = qnames;
+               univs =
+                 Array.append [| Name (Id.of_string "motive") |] unames;
+             }
+             ( Instance.of_array
+                 ([||], Array.append [| u |] (snd (Instance.to_array inst))),
+               csts ))
+    in
+    lean_scheme env ~dep:true (mind, ind_index) inst u, uentry
+  in
+  let declare_one_scheme (suffix, sort) =
+    let id = Id.of_string (Id.to_string ind_name ^ suffix) in
+    let body, uentry = make_scheme sort in
+    let elim =
+      quickdef ~name:id ~types:None
+        ~univs:(uentry, UnivNames.empty_binders) body
+    in
+    let liftu level =
+      let u =
+        match Level.var_index level with
+        | None -> Universe.make level
+        | Some index -> Universe.make (Level.var (index + 1))
+      in
+      Some u
+    in
+    let scheme_algs =
+      if sort = SchemeSProp then algs
+      else
+        universe_var 0
+        :: List.map (UnivSubst.subst_univs_universe liftu) algs
+    in
+    let scheme_index =
+      if squashy.lean_squashes then i
+      else if sort = SchemeType then 2 * i
+      else (2 * i) + 1
+    in
+    add_declared (N.append n "rec") scheme_index
+      { ref = elim; algs = scheme_algs }
+  in
+  let elims =
+    if squashy.lean_squashes then [ "_indl", SchemeSProp ]
+    else [ "_recl", SchemeType; "_indl", SchemeSProp ]
+  in
+  List.iter
+    (fun elim ->
+      try declare_one_scheme elim
+      with e when CErrors.noncritical e && error_mode e = Skip ->
+        Feedback.msg_info Pp.(str "Skipping scheme"))
+    elims
 
 (** Generate and add the squashy info *)
 let squashify { name = n; params; ty; ctors; univs } =
