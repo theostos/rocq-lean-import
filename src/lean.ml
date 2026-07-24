@@ -933,6 +933,13 @@ let entries : entry N.Map.t ref = Summary.ref ~name:"lean-entries" N.Map.empty
 let squash_info : squashy N.Map.t ref =
   Summary.ref ~name:"lean-squash-info" N.Map.empty
 
+type translated_mutual_inductive = {
+  source_inductive : ind;
+  translated_arity : Constr.t;
+  constructor_names : N.t list;
+  constructor_types : Constr.t list;
+}
+
 let add_declared n i inst =
   declared :=
     N.Map.update n
@@ -1694,7 +1701,7 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
     ~squashy;
   inst
 
-and declare_mutual_inds inds i =
+and declare_mutual_inductive_instance inds i =
   match inds with
   | [] | [ _ ] -> assert false
   | first :: _ ->
@@ -1795,7 +1802,12 @@ and declare_mutual_inds inds i =
           in
           let ctor_names, ctor_types = List.split ctors in
           ( (current + 1, uconv),
-            (ind, ty, ctor_names, ctor_types) ))
+            {
+              source_inductive = ind;
+              translated_arity = ty;
+              constructor_names = ctor_names;
+              constructor_types = ctor_types;
+            } ))
         (0, uconv) arities
     in
     let univs, algs = univ_entry_gen uconv first.univs in
@@ -1806,13 +1818,16 @@ and declare_mutual_inds inds i =
         mind_entry_finite = finite;
         mind_entry_inds =
           List.map
-            (fun (ind, ty, ctor_names, ctor_types) ->
+            (fun packet ->
               {
-                Entries.mind_entry_typename = name_for ind.name i;
-                mind_entry_arity = ty;
+                Entries.mind_entry_typename =
+                  name_for packet.source_inductive.name i;
+                mind_entry_arity = packet.translated_arity;
                 mind_entry_consnames =
-                  List.map (fun name -> name_for name i) ctor_names;
-                mind_entry_lc = ctor_types;
+                  List.map
+                    (fun name -> name_for name i)
+                    packet.constructor_names;
+                mind_entry_lc = packet.constructor_types;
               })
             packets;
         mind_entry_private = None;
@@ -1830,8 +1845,8 @@ and declare_mutual_inds inds i =
       try act Declarations.BiFinite with _ -> act Declarations.Finite
     in
     List.iteri
-      (fun ind_index (ind, _ty, ctor_names, _ctor_types) ->
-        add_declared ind.name i
+      (fun ind_index packet ->
+        add_declared packet.source_inductive.name i
           { ref = GlobRef.IndRef (mind, ind_index); algs };
         List.iteri
           (fun ctor_index ctor_name ->
@@ -1842,10 +1857,11 @@ and declare_mutual_inds inds i =
                     ((mind, ind_index), ctor_index + 1);
                 algs;
               })
-          ctor_names)
+          packet.constructor_names)
       packets;
     List.iteri
-      (fun ind_index (ind, _ty, _ctor_names, _ctor_types) ->
+      (fun ind_index packet ->
+        let ind = packet.source_inductive in
         declare_lean_schemes ~mind ~ind_index ~n:ind.name
           ~ind_name:(name_for ind.name i) ~i ~univs ~algs
           ~squashy:(N.Map.get ind.name !squash_info))
@@ -2087,12 +2103,14 @@ let declare_ind ind =
   let () = squashify ind in
   declare_instances (fun i -> ignore (declare_ind ind i)) ind.univs
 
-let declare_mutual_inds inds =
+let declare_mutual_inductive_group inds =
   List.iter squashify inds;
   match inds with
   | [] -> assert false
   | first :: _ ->
-    declare_instances (fun i -> declare_mutual_inds inds i) first.univs
+    declare_instances
+      (fun i -> declare_mutual_inductive_instance inds i)
+      first.univs
 
 let entry_name = function
 | Quot name | Def { name } | Ax { name } | Ind { name } -> name
@@ -2108,7 +2126,7 @@ let add_entry entry =
   entries := N.Map.add (entry_name entry) entry !entries
 
 let add_mutual_entries inds =
-  declare_mutual_inds inds;
+  declare_mutual_inductive_group inds;
   List.iter
     (fun ind -> entries := N.Map.add ind.name (Ind ind) !entries)
     inds
@@ -2126,6 +2144,12 @@ let { Goptions.get = print_squashes } =
 type input_state = {
   pstate : LeanParse.parsing_state;
   skips : int;
+}
+
+type pending_inductive_group = {
+  first_line : int;
+  first_raw : string;
+  members_rev : ind list;
 }
 
 let finish state =
@@ -2252,9 +2276,13 @@ let process_effect state ch ~line_no ~raw ~name act =
 
 let process_pending state ch = function
   | None -> Some state
-  | Some (line_no, raw, inds) ->
-    let first = List.hd inds in
-    process_effect state ch ~line_no ~raw ~name:first.name (fun () ->
+  | Some { first_line; first_raw; members_rev } ->
+    let inds = List.rev members_rev in
+    let first =
+      match inds with first :: _ -> first | [] -> assert false
+    in
+    process_effect state ch ~line_no:first_line ~raw:first_raw
+      ~name:first.name (fun () ->
         match inds with
         | [ ind ] -> add_entry (Ind ind)
         | _ -> add_mutual_entries inds)
@@ -2289,9 +2317,15 @@ let rec do_input_pending state ~from ~until ~pending ch =
       | false, Some (Entry (Ind ind)) ->
         let pending =
           match pending with
-          | None -> Some (!lcnt, line, [ ind ])
-          | Some (line_no, raw, inds) ->
-            Some (line_no, raw, inds @ [ ind ])
+          | None ->
+            Some
+              {
+                first_line = !lcnt;
+                first_raw = line;
+                members_rev = [ ind ];
+              }
+          | Some pending ->
+            Some { pending with members_rev = ind :: pending.members_rev }
         in
         incr lcnt;
         do_input_pending state ~from ~until ~pending ch
