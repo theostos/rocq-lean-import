@@ -2539,6 +2539,36 @@ let expose_iota_scrutinee env term =
   let exposed = expose head in
   if Array.length args = 0 then exposed else Constr.mkApp (exposed, args)
 
+(** Take one transparent reduction step without invoking Rocq's conversion
+    oracle on the whole closed computation. The returned constant list prevents
+    cycles while following transparent wrappers. *)
+let reduce_closed_term_once env evd unfolded term =
+  let reduced =
+    expose_iota_scrutinee env term |> EConstr.of_constr
+    |> Reductionops.whd_betaiotazeta env evd
+    |> EConstr.Unsafe.to_constr
+  in
+  if not (Constr.equal reduced term) then Some (unfolded, reduced)
+  else
+    let head, args = Constr.decompose_app term in
+    let constant_unseen constant =
+      not
+        (List.exists
+           (fun seen -> Environ.QConstant.equal env constant seen)
+           unfolded)
+    in
+    match Constr.kind term, Constr.kind head with
+    | LetIn (_, value, _, body), _ ->
+      Some (unfolded, Vars.subst1 value body)
+    | _, Const (constant, instance) when constant_unseen constant -> (
+      try
+        let body = Environ.constant_value_in env (constant, instance) in
+        Some (constant :: unfolded, beta_apply body args)
+      with Environ.NotEvaluableConst _ -> None)
+    | App _, (Lambda _ | LetIn _) ->
+      Some (unfolded, beta_apply head args)
+    | _ -> None
+
 let max_reflected_bits = Z.of_int 1_000_000
 
 let reflected_size_ok value =
@@ -2620,68 +2650,26 @@ let reify_nat env evd term =
                             })))
           else None
         in
-        match
-          binary "lean.Nat_add" "lean.NatCertificate_add"
-            (fun a b -> Some (Z.add a b))
-        with
+        let reflected =
+          List.find_map
+            (fun (key, proof_key, operation) ->
+              binary key proof_key operation)
+            [
+              ( "lean.Nat_add",
+                "lean.NatCertificate_add",
+                (fun a b -> Some (Z.add a b)) );
+              ( "lean.Nat_mul",
+                "lean.NatCertificate_mul",
+                (fun a b -> Some (Z.mul a b)) );
+              ("lean.Nat_pow", "lean.NatCertificate_pow", reflected_pow);
+            ]
+        in
+        match reflected with
         | Some _ as result -> result
-        | None -> (
-          match
-            binary "lean.Nat_mul" "lean.NatCertificate_mul"
-              (fun a b -> Some (Z.mul a b))
-          with
-          | Some _ as result -> result
-          | None -> (
-            match
-              binary "lean.Nat_pow" "lean.NatCertificate_pow" reflected_pow
-            with
-            | Some _ as result -> result
-            | None ->
-              let reduced =
-                expose_iota_scrutinee env term |> EConstr.of_constr
-                |> Reductionops.whd_betaiotazeta env evd
-                |> EConstr.Unsafe.to_constr
-              in
-              if not (Constr.equal reduced term) then
-                preserve_original (reify (fuel - 1) unfolded reduced)
-              else (
-              match Constr.kind term with
-              | LetIn (_, value, _, body) ->
-                preserve_original
-                  (reify (fuel - 1) unfolded (Vars.subst1 value body))
-              | Const (constant, instance)
-                when not
-                       (List.exists
-                          (fun seen -> Environ.QConstant.equal env constant seen)
-                          unfolded) -> (
-                try
-                  let body =
-                    Environ.constant_value_in env (constant, instance)
-                  in
-                  preserve_original
-                    (reify (fuel - 1) (constant :: unfolded) body)
-                with Environ.NotEvaluableConst _ -> None)
-              | App _ -> (
-                match Constr.kind head with
-                | Const (constant, instance)
-                  when not
-                         (List.exists
-                            (fun seen ->
-                              Environ.QConstant.equal env constant seen)
-                            unfolded) -> (
-                  try
-                    let body =
-                      Environ.constant_value_in env (constant, instance)
-                    in
-                    preserve_original
-                      (reify (fuel - 1) (constant :: unfolded)
-                         (beta_apply body args))
-                  with Environ.NotEvaluableConst _ -> None)
-                | Lambda _ | LetIn _ ->
-                  preserve_original
-                    (reify (fuel - 1) unfolded (beta_apply head args))
-                | _ -> None)
-              | _ -> None)))
+        | None ->
+          Option.bind (reduce_closed_term_once env evd unfolded term)
+            (fun (unfolded, reduced) ->
+              preserve_original (reify (fuel - 1) unfolded reduced))
   in
   reify 128 [] term
 
