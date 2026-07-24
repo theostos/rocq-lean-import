@@ -1025,7 +1025,7 @@ let mk_string char string list char_uinst mkChar s =
   Constr.(mkApp (mkConstructU ((string, 1), UVars.Instance.empty), [| ls |]))
 
 (* [c] has type [indu] applied to [args] *)
-let rec unfold_proj_case env evd ~field ~indu ~mib ~mip ~args c =
+let unfold_proj_case env evd ~field ~indu ~mib ~mip ~args c =
   let ind = fst indu in
   let npar = mib.Declarations.mind_nparams in
   let ntypes = Declareops.mind_ntypes mib in
@@ -1057,12 +1057,20 @@ let rec unfold_proj_case env evd ~field ~indu ~mib ~mip ~args c =
     Environ.push_rel
       (Context.Rel.Declaration.LocalAssum (self_annot, self_ty)) env
   in
-  let args_self =
-    Array.map
-      (fun arg ->
-        EConstr.of_constr (Vars.lift 1 (EConstr.Unsafe.to_constr arg)))
-      args
+  let make_case ~params ~field ~ret_ty c =
+    let case_relev =
+      EConstr.Unsafe.to_relevance
+        (Retyping.relevance_of_type env_self evd (EConstr.of_constr ret_ty))
+    in
+    let p = ([| self_annot |], ret_ty) in
+    let branch_nas =
+      Array.of_list (List.rev_map Context.Rel.Declaration.get_annot ctor_ctx)
+    in
+    let branch = (branch_nas, Constr.mkRel (nargs - field)) in
+    Constr.mkCase
+      (ci, u, params, (p, case_relev), Constr.NoInvert, c, [| branch |])
   in
+  let params_self = Array.map (Vars.lift 1) params in
   let ret_ty =
     let ctor = Constr.mkConstructU (((fst ind, 0), 1), u) in
     let ctor_applied = Constr.mkApp (ctor, params) in
@@ -1072,8 +1080,7 @@ let rec unfold_proj_case env evd ~field ~indu ~mib ~mip ~args c =
         if i = field then t
         else
           let previous =
-            unfold_proj_case env_self evd ~field:i ~indu ~mib ~mip
-              ~args:args_self (Constr.mkRel 1)
+            make_case ~params:params_self ~field:i ~ret_ty:t (Constr.mkRel 1)
           in
           get_field_type (i + 1) (Vars.subst1 previous rest)
       | _ -> assert false
@@ -1086,17 +1093,7 @@ let rec unfold_proj_case env evd ~field ~indu ~mib ~mip ~args c =
     in
     get_field_type 0 (Vars.lift 1 ctor_ty)
   in
-  let case_relev =
-    EConstr.Unsafe.to_relevance
-      (Retyping.relevance_of_type env_self evd (EConstr.of_constr ret_ty))
-  in
-  let p = ([| self_annot |], ret_ty) in
-  let branch_nas =
-    Array.of_list (List.rev_map Context.Rel.Declaration.get_annot ctor_ctx)
-  in
-  let branch = (branch_nas, Constr.mkRel (nargs - field)) in
-  Constr.mkCase
-    (ci, u, params, (p, case_relev), Constr.NoInvert, c, [| branch |])
+  make_case ~params ~field ~ret_ty c
 
 let lcnt = ref 0
 
