@@ -14,3 +14,4 @@ projection_relevance.v
 mutual_inductives.v
 mutual_instances.v
 nested_containers.v
+nested_partial_application.v
