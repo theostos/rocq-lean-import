@@ -3045,7 +3045,10 @@ and declare_mutual_inductive_instance inds i =
           ~ind_name:(name_for ind.name i) ~i ~univs ~algs
           ~squashy:(N.Map.get ind.name !squash_info))
       packets;
-    ()
+    register_mutual_nested_recursors ~mind ~nparams
+      (List.map
+         (fun packet -> packet.source_inductive.name)
+         packets)
 
 and declare_lean_schemes ~mind ~ind_index ~n ~ind_name ~i ~univs ~algs
     ~squashy =
