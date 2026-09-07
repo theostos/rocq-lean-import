@@ -1,8 +1,8 @@
-# Store parser graphs in chunked indices and indexed checkpoints
+# Preserve the remaining importer experiment diagnostics
 
-Base: `review/translation-sharing`. Compare against this base, not upstream.
+Base: `review/indexed-checkpoints`. Compare against this base, not upstream.
 
-Use persistent chunks for parser tables and serialize expression edges as integer references. Pack ancestor state and restore it lazily, preserving entry/parser sharing and supported legacy formats. This addresses checkpoint memory peaks in the multi-million-line cslib run. Tests cover DAG aliases, metadata, append persistence and malformed indexed data. Atomic promotion and resource guards live in the arena repository.
+Restore the exact runtime source snapshot, including opt-in declaration/AST/timing diagnostics and its README. All implementation topics are in the preceding branches. This branch is the reproducibility tail, not an additional upstream PR. The small constructor-owner fixture and parser unit tests are retained as review additions.
 
 ## Validation
 

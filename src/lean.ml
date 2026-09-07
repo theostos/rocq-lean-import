@@ -3381,6 +3381,24 @@ and ensure_exists n i =
       | exception Not_found -> CErrors.user_err Pp.(str "missing " ++ N.pp n)))
 
 and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
+  let diagnostic_selected key =
+    match Sys.getenv_opt key with
+    | Some selector ->
+      String.equal selector (string_of_int !lcnt)
+      || String.equal selector (N.to_lean_string n)
+    | None -> false
+  in
+  let trace_declaration event =
+    match Sys.getenv_opt "LEAN_IMPORT_DECLARE_TRACE_LINE" with
+    | Some line when Int.equal !lcnt (int_of_string line) ->
+      let gc = Gc.quick_stat () in
+      Printf.eprintf
+        "[declare %s] %s instance %d cpu=%.3f heap_words=%d major=%d\n%!"
+        event (N.to_lean_string n) i (Sys.time ())
+        gc.Gc.heap_words gc.Gc.major_collections
+    | Some _ | None -> ()
+  in
+  let () = trace_declaration "start" in
   let ref, algs, delay_power_unfolding =
     match get_predeclared_def_some n i with
     | Some
@@ -3405,12 +3423,182 @@ and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
       (GlobRef.ConstRef c, [], predeclared = Pow)
     | None ->
       let uconv = start_uconv univs i in
+      let () = trace_declaration "before type" in
       let uconv, ty = to_constr empty_env ty uconv in
+      let () = trace_declaration "after type" in
+      let () =
+        if diagnostic_selected "LEAN_IMPORT_DUMP_LEAN_AST"
+        then
+          let module ExprTable = Hashtbl.Make (struct
+            type t = LeanExpr.expr
+            let equal = ( == )
+            let hash expr = Hashtbl.hash_param 1 1 expr
+          end) in
+          let nodes = ref 0 in
+          let max_depth = ref 0 in
+          let constants = Hashtbl.create 97 in
+          let visited = ExprTable.create 9973 in
+          let add_constant name =
+            let name = N.to_lean_string name in
+            let count = Option.default 0 (Hashtbl.find_opt constants name) in
+            Hashtbl.replace constants name (count + 1)
+          in
+          let rec visit depth expr =
+            if not (ExprTable.mem visited expr) then begin
+              ExprTable.add visited expr ();
+              incr nodes;
+              max_depth := Stdlib.max !max_depth depth;
+              match expr with
+              | Bound _ | Sort _ | Nat _ | String _ -> ()
+              | Const (name, _) -> add_constant name
+              | App (f, x) -> visit (depth + 1) f; visit (depth + 1) x
+              | Let { ty; v; rest; _ } ->
+                visit (depth + 1) ty;
+                visit (depth + 1) v;
+                visit (depth + 1) rest
+              | Lam (_, _, ty, body) | Pi (_, _, ty, body) ->
+                visit (depth + 1) ty;
+                visit (depth + 1) body
+              | Proj (_, _, term) -> visit (depth + 1) term
+            end
+          in
+          visit 0 body;
+          let constants =
+            Hashtbl.to_seq constants |> List.of_seq
+            |> List.sort (fun (name1, count1) (name2, count2) ->
+                 let order = Int.compare count2 count1 in
+                 if Int.equal order 0 then String.compare name1 name2
+                 else order)
+            |> fun constants ->
+               CList.firstn (min 100 (List.length constants)) constants
+          in
+          let aliases =
+            match N.Map.find_opt n !projection_aliases with
+            | None -> "none"
+            | Some aliases ->
+              Int.Map.bindings aliases
+              |> List.map (fun (instance, _) -> string_of_int instance)
+              |> String.concat ","
+          in
+          CErrors.user_err
+            Pp.(
+              str (Printf.sprintf
+                     "Lean AST for %s (instance %d; projection aliases %s): %d nodes, maximum depth %d"
+                     (N.to_lean_string n) i aliases !nodes !max_depth)
+              ++ fnl ()
+              ++ v 0
+                   (prlist_with_sep fnl
+                      (fun (name, count) ->
+                        str (Printf.sprintf "%7d  %s" count name))
+                      constants))
+      in
+      let () = trace_declaration "before body" in
       let uconv, body = to_constr empty_env body uconv in
+      let () = trace_declaration "after body" in
+      let () =
+        if diagnostic_selected "LEAN_IMPORT_DUMP_ROCQ_AST"
+        then begin
+          let depths = PhysicalConstrCache.create 4093 in
+          let pending = ref [ body, 0 ] in
+          let nodes = ref 0 in
+          let max_depth = ref 0 in
+          let has_pending () = match !pending with [] -> false | _ -> true in
+          while has_pending () do
+            match !pending with
+            | [] -> assert false
+            | (term, depth) :: rest ->
+              pending := rest;
+              let previous = PhysicalConstrCache.find_opt depths term in
+              if match previous with None -> true | Some old -> depth > old
+              then begin
+                if Option.is_empty previous then incr nodes;
+                PhysicalConstrCache.replace depths term depth;
+                max_depth := max !max_depth depth;
+                Constr.iter
+                  (fun child -> pending := (child, depth + 1) :: !pending)
+                  term
+              end
+          done;
+          CErrors.user_err
+            Pp.(str (Printf.sprintf "Rocq AST: %d nodes, maximum depth %d"
+                       !nodes !max_depth))
+        end
+      in
+      let trace_declaration_stage = trace_declaration in
+      let () = trace_declaration_stage "before universes" in
       let univs, algs = univ_entry uconv univs in
+      let () = trace_declaration_stage "after universes" in
+      let () =
+        if Option.has_some (Sys.getenv_opt "LEAN_IMPORT_DUMP_INFERRED_TYPE") &&
+           Int.equal !lcnt 4381114
+        then
+          let env = Global.env () in
+          let evd = Evd.from_env env in
+          let inferred =
+            Retyping.get_type_of env evd (EConstr.of_constr body)
+            |> EConstr.Unsafe.to_constr
+          in
+          CErrors.user_err
+            Pp.(str "Inferred body type:" ++ fnl () ++
+                Printer.pr_constr_env env evd inferred ++
+                fnl () ++ str "Expected type:" ++ fnl () ++
+                Printer.pr_constr_env env evd ty)
+      in
+      let () =
+        if diagnostic_selected "LEAN_IMPORT_DUMP_CURRENT_DEF"
+        then
+          CErrors.user_err
+            Pp.(str "Translated body:" ++ fnl () ++
+                Printer.pr_constr_env (Global.env ())
+                  (Evd.from_env (Global.env ())) body ++
+                fnl () ++ str "Translated type:" ++ fnl () ++
+                Printer.pr_constr_env (Global.env ())
+                  (Evd.from_env (Global.env ())) ty)
+      in
       let ref =
-        quickdef ~opaque:kernel_opaque ~name:(name_for n i)
-          ~types:(Some ty) ~univs body
+        try
+          let () = trace_declaration_stage "before quickdef" in
+          let name = name_for n i in
+          let () = trace_declaration_stage "after name" in
+          let ref =
+            quickdef ~opaque:kernel_opaque ~name
+              ~types:(Some ty) ~univs body
+          in
+          let () =
+            match Sys.getenv_opt "LEAN_IMPORT_RELEVANCE_TRACE_LINE", ref with
+            | Some line, GlobRef.ConstRef constant
+              when Int.equal !lcnt (int_of_string line) ->
+              let relevance =
+                (Global.lookup_constant constant).Declarations.const_relevance
+              in
+              let relevance = match relevance with
+                | Sorts.Relevant -> "relevant"
+                | Sorts.Irrelevant -> "irrelevant"
+                | Sorts.RelevanceVar _ -> "variable"
+              in
+              Printf.eprintf "[declared relevance] line=%d %s\n%!" !lcnt relevance
+            | Some _, (GlobRef.ConstRef _ | GlobRef.VarRef _ | GlobRef.IndRef _
+                      | GlobRef.ConstructRef _)
+            | None, _ -> ()
+          in
+          let () = trace_declaration_stage "after quickdef" in
+          ref
+        with e ->
+          let e = Exninfo.capture e in
+          (* Rendering the entire failed term can exhaust memory while
+             reporting an error or timeout. Keep this diagnostic opt-in. *)
+          (if diagnostic_selected "LEAN_IMPORT_DUMP_FAILED_DEF" then
+             Feedback.msg_info
+               Pp.(
+                 str "Failed with" ++ fnl ()
+                 ++ Printer.pr_constr_env (Global.env ())
+                      (Evd.from_env (Global.env ()))
+                      body
+                 ++ fnl () ++ str ": "
+                 ++ Printer.pr_constr_env (Global.env ())
+                      (Evd.from_env (Global.env ()))
+                      ty));
+          Exninfo.iraise e
       in
       (ref, algs, false)
   in
@@ -3482,6 +3670,7 @@ and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
       Global.register_peano_nat_mod_go worker
     | _ -> assert false
   in
+  let () = trace_declaration "done" in
   inst
 
 and declare_ax { name = n; ty; univs } i =
@@ -4527,6 +4716,10 @@ let process_effect state ch ~line_no ~raw ~name act =
   match with_line_timeout act with
   | () -> Some state
   | exception e ->
+    let () =
+      if Option.has_some (Sys.getenv_opt "LEAN_IMPORT_EXCEPTION_BACKTRACE") then
+        Printf.eprintf "[exception backtrace]\n%s\n%!" (Printexc.get_backtrace ())
+    in
     let e = Exninfo.capture e in
     let epp =
       Pp.(
