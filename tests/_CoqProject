@@ -31,3 +31,6 @@ record_valued_definition_eta.v
 nat_deceq.v
 constructor_owner.v
 dependent_sprop_projection.v
+nested_below.v
+nested_record_tree_cases.v
+nested_mixed_fields.v
