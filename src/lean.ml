@@ -961,6 +961,8 @@ type predeclared_def_kind =
   | Blt
   | Nat_decEq
   | Nat_isValidChar
+  | UInt32_toNat
+  | UInt32_isValidChar
 type predeclared_ind_as_def_kind = ULift_cumul
 
 let get_predeclared_cnames (k : predeclared_ind_kind) n =
@@ -1037,6 +1039,8 @@ let get_predeclared_def_any n i =
       (Blt, [ "Nat"; "blt" ]);
       (Nat_decEq, [ "Nat"; "decEq" ]);
       (Nat_isValidChar, [ "Nat"; "isValidChar" ]);
+      (UInt32_toNat, [ "UInt32"; "toNat" ]);
+      (UInt32_isValidChar, [ "UInt32"; "isValidChar" ]);
     ]
 
 let get_predeclared_def_some n i =
@@ -2998,7 +3002,9 @@ and declare_def { name = n; ty; body; univs; } i =
            | Ble
            | Blt
            | Nat_decEq
-           | Nat_isValidChar ) as predeclared),
+           | Nat_isValidChar
+           | UInt32_toNat
+           | UInt32_isValidChar ) as predeclared),
           _,
           (def_name, c) ) ->
       (* Hack to let the user predeclare some constants

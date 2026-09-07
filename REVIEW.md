@@ -1,8 +1,8 @@
-# Use compact kernel arithmetic instead of proof transports
+# Align the foundation with modern UInt32 and character computations
 
-Base: `review/nested-fix-match`. Compare against this base, not upstream.
+Base: `review/compact-kernel-integration`. Compare against this base, not upstream.
 
-Register the generic Lean Nat encoding and operations with the experimental kernel. Keep large literals compact and remove the proof-certificate/application-transport path it replaces. Register checked division and modulus workers when they are declared. Motivating failures include Int32.toInt_lt and Int32.ofInt_tdiv. Requires the Rocq review stack; this is not a stock-Rocq PR.
+Extend the already integrated UInt32/Char layout with their toNat/validity predeclarations and update the foundation character computations and stdlib imports. This is the later foundation delta, not a replacement for pr/uint32-modern-dump or pr/string-of-list. The imported core fixture exercises Char.ofNatAux and its dependent proof. Requires the compact arithmetic branch below it.
 
 ## Validation
 

@@ -1,4 +1,5 @@
-From Stdlib Require ZArith NArith Lia ZifyBool Uint63.
+From Stdlib Require BinInt BinNat Nnat Znat Lia ZifyBool.
+From Corelib Require Uint63Axioms.
 Declare ML Module "coq-lean-import.plugin".
 
 Set Universe Polymorphism.
@@ -386,9 +387,13 @@ Record UInt32@{} := UInt32_ofBitVec { toBitVec : BitVec 32 }.
 Register UInt32 as lean.UInt32.
 Register toBitVec as lean.toBitVec.
 
+Definition UInt32_toNat (n : UInt32) : Nat :=
+  n.(toBitVec).(toFin _).(val _).
+Register UInt32_toNat as lean.UInt32_toNat.
+
 
 Section strings.
-  Import ZArith NArith Lia Zify ZifyBool.
+  Import BinInt BinNat Nnat Znat Lia Zify ZifyBool.
   Variant InvalidUInt32 (n : N) : Set := invalid_uint32.
   Variant InvalidChar (n : N) : Set := invalid_char.
   #[local] Set Warnings "-abstract-large-number".
@@ -432,7 +437,11 @@ Section strings.
   #[local] Open Scope Nat_scope.
 
   Definition Nat_isValidChar (n : Nat) : SProp
-    := n < 0xd800 \/ (0xdfff < n /\ n < 0x110000).
+    := n < CompactNat 0xd800%N \/
+       (CompactNat 0xdfff%N < n /\ n < CompactNat 0x110000%N).
+
+  Definition UInt32_isValidChar (n : UInt32) : SProp :=
+    Nat_isValidChar n.(toBitVec).(toFin _).(val _).
 
   Record Char@{} := Char_mk
   { val1 : UInt32; valid : Nat_isValidChar val1.(toBitVec).(toFin _).(val _) }.
@@ -468,14 +477,67 @@ Section strings.
     unfold Nat_of_N. rewrite N2Nat.inj_pow.
     eapply Nat_nat_pow. 
   Qed.
-  
-  Lemma Nat_lt_to_N_pow (n : N) (m : N) : (n <? 2 ^ m)%N = true -> Nat_of_N n < Nat_pow 2 (Nat_of_N m).
+
+  Lemma double_Nat_of_nat (n : nat) :
+    double (Nat_of_nat n) = Nat_of_nat (n + n).
   Proof.
-    rewrite <- Nat_pow_comm. eapply Nat_lt_to_N.
+    induction n as [|n IHn].
+    - reflexivity.
+    - cbn [double Nat_of_nat Nat.add].
+      rewrite Nat.add_succ_r, IHn.
+      reflexivity.
   Qed.
 
-  Definition Fin_mk_N_pow (n : N) (val : N) (isLt : (val <? 2 ^ n)%N = true) : Fin (Nat_pow 2 (Nat_of_N n))
-    := Fin_mk (Nat_pow 2 (Nat_of_N n)) (Nat_of_N val) (Nat_lt_to_N_pow val n isLt).
+  Lemma CompactPos_eq_Nat_of_nat (p : positive) :
+    CompactPos p = Nat_of_nat (Pos.to_nat p).
+  Proof.
+    induction p as [p IHp | p IHp |].
+    - rewrite Pos2Nat.inj_xI.
+      replace (2 * Pos.to_nat p)%nat with
+        (Pos.to_nat p + Pos.to_nat p)%nat by lia.
+      cbn [CompactPos Nat_of_nat].
+      now rewrite IHp, double_Nat_of_nat.
+    - rewrite Pos2Nat.inj_xO.
+      replace (2 * Pos.to_nat p)%nat with
+        (Pos.to_nat p + Pos.to_nat p)%nat by lia.
+      cbn [CompactPos].
+      now rewrite IHp, double_Nat_of_nat.
+    - reflexivity.
+  Qed.
+
+  Lemma CompactNat_eq_Nat_of_N (n : N) : CompactNat n = Nat_of_N n.
+  Proof.
+    destruct n as [|p].
+    - reflexivity.
+    - apply CompactPos_eq_Nat_of_nat.
+  Qed.
+
+  Lemma CompactNat_lt_to_N (n m : N) :
+    (n <? m)%N = true -> CompactNat n < CompactNat m.
+  Proof.
+    rewrite !CompactNat_eq_Nat_of_N.
+    apply Nat_lt_to_N.
+  Qed.
+
+  Lemma CompactNat_pow_comm (n : N) :
+    CompactNat (2 ^ n) = Nat_pow 2 (CompactNat n).
+  Proof.
+    rewrite !CompactNat_eq_Nat_of_N.
+    apply Nat_pow_comm.
+  Qed.
+  
+  Lemma Nat_lt_to_N_pow (n : N) (m : N) :
+    (n <? 2 ^ m)%N = true -> Nat_of_N n < Nat_pow 2 (CompactNat m).
+  Proof.
+    rewrite <- CompactNat_pow_comm, CompactNat_eq_Nat_of_N.
+    apply Nat_lt_to_N.
+  Qed.
+
+  Definition Fin_mk_N_pow (n : N) (val : N)
+      (isLt : (val <? 2 ^ n)%N = true) :
+      Fin (Nat_pow 2 (CompactNat n)) :=
+    Fin_mk (Nat_pow 2 (CompactNat n)) (Nat_of_N val)
+      (Nat_lt_to_N_pow val n isLt).
 
   Definition UInt32_mk_N (val : N) (isLt : (val <? 0x100000000)%N = true) : UInt32
     := UInt32_ofBitVec (BitVec_ofFin 32 (Fin_mk_N_pow 32 val isLt)).
@@ -483,7 +545,9 @@ Section strings.
   Lemma Nat_isValidChar_mk_N (n : N) (isLt : check_N_isValidChar n = true)
     : Nat_isValidChar (Nat_of_N n).
   Proof.
-    cbv [Nat_isValidChar Nat_of_num_uint check_N_isValidChar] in *.
+    unfold Nat_isValidChar.
+    rewrite !CompactNat_eq_Nat_of_N.
+    cbv [Nat_of_num_uint check_N_isValidChar] in *.
     pose proof (Nat_lt_to_N n 0xd800) as H1.
     pose proof (Nat_lt_to_N 0xdfff n) as H2.
     pose proof (Nat_lt_to_N n 0x110000) as H3.
@@ -505,7 +569,8 @@ Section strings.
   Qed.
 
   Definition Char_mk_N (val : N) (isLt : ((val <? 0x100000000)%N && check_N_isValidChar val)%bool = true) : Char
-    := Char_mk (UInt32_mk_N val (proj1 (andb_prop _ _ isLt))) (Nat_isValidChar_mk_N val (proj2 (andb_prop _ _ isLt))).
+    := Char_mk (UInt32_mk_N val (proj1 (andb_prop _ _ isLt)))
+         (Nat_isValidChar_mk_N val (proj2 (andb_prop _ _ isLt))).
 
   Definition reflective_Char_mk (val : N)
     : if ((val <? 0x100000000)%N && check_N_isValidChar val)%bool
@@ -517,8 +582,8 @@ Section strings.
        | false => fun _ => invalid_char val
        end Logic.eq_refl.
 
-  Definition reflective_Char_mk_prim (val : Uint63.int)
-    := reflective_Char_mk (Z.to_N (Uint63.to_Z val)).
+  Definition reflective_Char_mk_prim (val : PrimInt63.int)
+    := reflective_Char_mk (Z.to_N (Uint63Axioms.to_Z val)).
 
 
   (* Definition reflective_UInt32_mk (val : N) : if (val <? 0x100000000)%N
@@ -530,8 +595,8 @@ Section strings.
        | false => fun _ => invalid_uint32 val
        end Logic.eq_refl.
 
-  Definition reflective_UInt32_mk_prim (val : Uint63.int)
-    := reflective_UInt32_mk (Z.to_N (Uint63.to_Z val)).
+  Definition reflective_UInt32_mk_prim (val : PrimInt63.int)
+    := reflective_UInt32_mk (Z.to_N (Uint63Axioms.to_Z val)).
 
 
   Definition check_isValidChar (n : Nat) : bool
@@ -569,6 +634,7 @@ Section strings.
 End strings.
 
 Register Nat_isValidChar as lean.Nat_isValidChar.
+Register UInt32_isValidChar as lean.UInt32_isValidChar.
 Register Char as lean.Char.
 Register reflective_Char_mk_prim as lean.Char.mk.reflective_prim.
 
