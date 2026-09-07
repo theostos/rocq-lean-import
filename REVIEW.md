@@ -1,8 +1,8 @@
-# Preserve Lean reducibility hints and genuine opacity
+# Register unit-like inductives and simplify their nullary schemes
 
-Base: `review/modern-core-foundation`. Compare against this base, not upstream.
+Base: `review/reducibility-hints`. Compare against this base, not upstream.
 
-Read abbreviation, regular-height and opaque-hint export records, and install persistent Rocq strategies. Keep an opaque reducibility hint distinct from a genuinely opaque declaration. This supplies the conversion ordering used on large cslib dependencies such as Int32.toBitVec_not; it does not itself implement a new conversion rule. The NDJSON exporter must preserve the same metadata.
+Register eligible unit-like types, including types restored from a checkpoint. For a nullary constructor, check the branch-only eliminator against the generated dependent scheme type. This fixes Cslib.Automata.NA.FinAcc.instTotalSumUnitFinLoopOfNonemptyElemStart. Constructors with fields and indexed types retain ordinary schemes. Requires the experimental kernel unit-eta rule.
 
 ## Validation
 

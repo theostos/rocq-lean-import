@@ -139,6 +139,37 @@ let project_primitive_record_scheme env (mind, ind_index) body =
     | _ -> body)
   | _ -> body
 
+(** A nullary unit-like constructor has no fields to inspect. Lean's recursor
+    returns its sole branch even on a neutral scrutinee; Rocq's generated
+    [match] does not. Use the already registered unit eta rule to typecheck
+    the branch-only eliminator against the original dependent scheme type.
+    Indexed types and constructors with fields must keep their usual scheme. *)
+let nullary_unit_scheme env ind body =
+  let mib, packet = Inductive.lookup_mind_specif env ind in
+  if
+    List.exists (Ind.UserOrd.equal ind)
+      (Environ.retroknowledge env).Retroknowledge.retro_unit_like
+    && Int.equal packet.mind_nrealargs 0
+    && Array.length packet.mind_consnrealdecls = 1
+    && Int.equal packet.mind_consnrealdecls.(0) 0
+  then
+    let binders, inside =
+      Term.decompose_lambda_n_assum (mib.mind_nparams + 3) body
+    in
+    match Constr.kind inside with
+    | Constr.Case (_, _, _, _, _, scrutinee, branches)
+      when Constr.equal scrutinee (Constr.mkRel 1)
+           && Array.length branches = 1
+           && Array.length (fst branches.(0)) = 0
+           && Constr.equal (snd branches.(0)) (Constr.mkRel 2) ->
+      let replacement = Term.it_mkLambda_or_LetIn (Constr.mkRel 2) binders in
+      let ty = (Typeops.infer env body).Environ.uj_type in
+      ignore
+        (Typeops.infer env (Constr.mkCast (replacement, Constr.DEFAULTcast, ty)));
+      replacement
+    | _ -> body
+  else body
+
 (** Whether Rocq's induction-scheme generator will add a recursive hypothesis
     for an argument of type [term]. A mere occurrence of [mind] is not enough:
     for a nested occurrence, Rocq only adds the hypothesis when the enclosing
@@ -393,7 +424,8 @@ let lean_scheme env ~dep (mind, ind_index) u s =
     Term.it_mkLambda_or_LetIn (Term.it_mkLambda_or_LetIn body fcs) paramsP
     end
   in
-  project_primitive_record_scheme env (mind, ind_index) body
+  let body = project_primitive_record_scheme env (mind, ind_index) body in
+  nullary_unit_scheme env (mind, ind_index) body
 
 let with_unsafe_univs f () =
   let flags = Global.typing_flags () in
@@ -3127,6 +3159,27 @@ and to_params uconv params =
   in
   (acc, List.rev params)
 
+and register_unit_like_if_applicable ind =
+  let mib, mip = Inductive.lookup_mind_specif (Global.env ()) ind in
+  let constructor_fields_are_irrelevant () =
+    let constructor_context, _ = mip.Declarations.mind_nf_lc.(0) in
+    let fields, _ =
+      CList.chop mip.Declarations.mind_consnrealdecls.(0) constructor_context
+    in
+    List.for_all
+      (function
+        | RelDecl.LocalAssum (annot, _) ->
+          not (Sorts.is_relevant annot.Context.binder_relevance)
+        | RelDecl.LocalDef _ -> true)
+      fields
+  in
+  if
+    Int.equal (Array.length mib.Declarations.mind_packets) 1
+    && Int.equal mip.Declarations.mind_nrealargs 0
+    && Int.equal (Array.length mip.Declarations.mind_user_lc) 1
+    && constructor_fields_are_irrelevant ()
+  then Global.register_unit_like ind
+
 and declare_ind { name = n; params; ty; ctors; univs } i =
   (* Handle inductives predeclared as definitions (e.g., ULift with cumulativity).
      We check if there's a cumul registration for this specific instance. *)
@@ -3443,6 +3496,8 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
         add_projection_alias name i alias)
       projection_aliases
   in
+
+  register_unit_like_if_applicable (mind, 0);
 
   declare_lean_schemes ~mind ~ind_index:0 ~n ~ind_name ~i ~univs ~algs
     ~squashy;
@@ -4250,7 +4305,23 @@ let lean_obj =
       classify_function = (fun _ -> Keep);
     }
 
+let register_existing_unit_like () =
+  let inductives =
+    N.Map.fold
+      (fun _ instances inductives ->
+        Int.Map.fold
+          (fun _ instance inductives ->
+            match instance.ref with
+            | GlobRef.IndRef ind -> Indset_env.add ind inductives
+            | GlobRef.VarRef _ | GlobRef.ConstRef _ | GlobRef.ConstructRef _ ->
+              inductives)
+          instances inductives)
+      !declared Indset_env.empty
+  in
+  Indset_env.iter register_unit_like_if_applicable inductives
+
 let import ~from ~until f =
+  register_existing_unit_like ();
   lcnt := 1;
   (* silence the definition messages from Coq *)
   let { pstate = pstatev } =
