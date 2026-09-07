@@ -1042,6 +1042,16 @@ let declared : instantiation Int.Map.t N.Map.t ref =
 
 let entries : entry N.Map.t ref = Summary.ref ~name:"lean-entries" N.Map.empty
 
+(* A constructor may be the first reference to a new universe instance of its
+   inductive. This derived index is rebuilt from [entries] on checkpoint load. *)
+let constructor_owners : N.t N.Map.t ref =
+  Summary.ref ~name:"lean-constructor-owners" N.Map.empty
+
+let index_constructors (ind : ind) owners =
+  List.fold_left
+    (fun owners (name, _) -> N.Map.add name ind.name owners)
+    owners ind.ctors
+
 (** Every member points to its complete mutual block.  Keeping this separately
     from [entries] is necessary when a later SProp universe instance is
     requested: such an instance must be declared as the same mutual block, not
@@ -3492,11 +3502,11 @@ and instantiate n univs uconv =
 and ensure_exists n i =
   try !declared |> N.Map.find n |> Int.Map.find i
   with Not_found ->
-    (* TODO can we end up asking for a ctor or eliminator before
-       asking for the inductive type? *)
-    (* if i = 0 then CErrors.user_err Pp.(N.pp n ++ str " was not instantiated!"); *)
-    (* assert (not (upfront_instances ())); *)
-    (match N.Map.find_opt n !mutual_entries with
+    (match N.Map.find_opt n !constructor_owners with
+    | Some owner ->
+      ignore (ensure_exists owner i);
+      !declared |> N.Map.find n |> Int.Map.find i
+    | None -> match N.Map.find_opt n !mutual_entries with
     | Some inds ->
       declare_mutual_inductive_instance inds i;
       !declared |> N.Map.find n |> Int.Map.find i
@@ -4466,12 +4476,16 @@ let add_entry entry =
     | Ax ax -> declare_ax ax
     | Ind ind -> declare_ind ind
   in
-  entries := N.Map.add (entry_name entry) entry !entries
+  entries := N.Map.add (entry_name entry) entry !entries;
+  (match entry with
+  | Ind ind -> constructor_owners := index_constructors ind !constructor_owners
+  | Def _ | Ax _ | Quot _ -> ())
 
 let add_mutual_entries inds =
   List.iter
     (fun ind ->
       entries := N.Map.add ind.name (Ind ind) !entries;
+      constructor_owners := index_constructors ind !constructor_owners;
       mutual_entries := N.Map.add ind.name inds !mutual_entries)
     inds;
   declare_mutual_inductive_group inds
@@ -4719,6 +4733,11 @@ let lean_obj =
     sets := setsv;
     declared := declaredv;
     entries := entriesv;
+    constructor_owners := N.Map.fold
+      (fun _ entry owners -> match entry with
+        | Ind ind -> index_constructors ind owners
+        | Def _ | Ax _ | Quot _ -> owners)
+      entriesv N.Map.empty;
     mutual_entries := mutual_entriesv;
     squash_info := squash_infov;
     height_cache := heightv;
