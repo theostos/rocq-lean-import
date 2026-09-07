@@ -130,19 +130,30 @@ let do_line ~lcnt state l =
   let line_msg name =
     Feedback.msg_info Pp.(str "line " ++ int lcnt ++ str ": " ++ N.pp name)
   in
+  let parse_def hint kernel_opaque name ty body univs =
+    let name = get_name state name in
+    line_msg name;
+    let ty = get_expr state ty
+    and body = get_expr state body
+    and univs = List.map (get_name state) univs in
+    let def = { name; ty; body; univs; hint; kernel_opaque } in
+    (state, Some (Entry (Def def)))
+  in
   (* Lean printing strangeness: sometimes we get double spaces (typically with INFIX) *)
   match
     List.filter (fun s -> s <> "") (String.split_on_char ' ' (String.trim l))
   with
   | [] -> (state, None) (* empty line *)
   | "#DEF" :: name :: ty :: body :: univs ->
-    let name = get_name state name in
-    line_msg name;
-    let ty = get_expr state ty
-    and body = get_expr state body
-    and univs = List.map (get_name state) univs in
-    let def = { name; ty; body; univs; } in
-    (state, Some (Entry (Def def)))
+    parse_def LegacyHint false name ty body univs
+  | "#ABBREV" :: name :: ty :: body :: univs ->
+    parse_def AbbrevHint false name ty body univs
+  | "#REGULAR" :: height :: name :: ty :: body :: univs ->
+    parse_def (RegularHint (int_of_string height)) false name ty body univs
+  | "#HINT_OPAQUE" :: name :: ty :: body :: univs ->
+    parse_def OpaqueHint false name ty body univs
+  | "#OPAQUE" :: name :: ty :: body :: univs ->
+    parse_def OpaqueHint true name ty body univs
   | "#AX" :: name :: ty :: univs ->
     let name = get_name state name in
     line_msg name;

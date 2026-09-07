@@ -21,15 +21,24 @@ let add_universe l ~lbound g =
   let g = UGraph.add_universe l ~strict:false g in
   UGraph.enforce_constraint (lbound, Le, l) g
 
-let quickdef ~name ~types ~univs body =
-  let entry = Declare.definition_entry ?types ~univs body in
+let quickdef ?(opaque = false) ~name ~types ~univs body =
+  let trace stage =
+    if Option.has_some (Sys.getenv_opt "LEAN_IMPORT_QUICKDEF_TRACE") then
+      Printf.eprintf "[quickdef] %s\n%!" stage
+  in
+  let () = trace "before entry" in
+  let entry = Declare.definition_entry ~opaque ?types ~univs body in
+  let () = trace "after entry" in
   let scope = Locality.(Global ImportDefaultBehavior) in
   let kind = Decls.(IsDefinition Definition) in
   let uctx =
     UState.empty
     (* used for ubinders and hook *)
   in
-  Declare.declare_entry ~name ~scope ~kind ~impargs:[] ~uctx entry
+  let () = trace "before declare" in
+  let ref = Declare.declare_entry ~name ~scope ~kind ~impargs:[] ~uctx entry in
+  let () = trace "after declare" in
+  ref
 
 type extended_level = Level of Level.t | LSProp
 
@@ -2988,7 +2997,7 @@ and ensure_exists n i =
       | Quot _ -> CErrors.user_err Pp.(str "quot must be predeclared")
       | exception Not_found -> CErrors.user_err Pp.(str "missing " ++ N.pp n)))
 
-and declare_def { name = n; ty; body; univs; } i =
+and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
   let ref, algs, delay_power_unfolding =
     match get_predeclared_def_some n i with
     | Some
@@ -3017,7 +3026,7 @@ and declare_def { name = n; ty; body; univs; } i =
       let uconv, body = to_constr empty_env body uconv in
       let univs, algs = univ_entry uconv univs in
       let ref =
-        quickdef ~name:(name_for n i)
+        quickdef ~opaque:kernel_opaque ~name:(name_for n i)
           ~types:(Some ty) ~univs body
       in
       (ref, algs, false)
@@ -3060,6 +3069,12 @@ and declare_def { name = n; ty; body; univs; } i =
         let level = if delay_power_unfolding then max 1 (-height) else -height in
         set_strategy level
     in
+    if kernel_opaque then ()
+    else match hint with
+    | OpaqueHint -> set_strategy 1
+    | AbbrevHint -> set_expand ()
+    | RegularHint height -> set_regular height
+    | LegacyHint ->
       if expands_at_head body then begin
         set_expand ();
         expand_head_cache := N.Set.add n !expand_head_cache
@@ -3657,8 +3672,8 @@ and declare_lean_schemes ~mind ~ind_index ~n ~ind_name ~i ~univs ~algs
     (match (Global.lookup_mind mind).mind_packets.(ind_index).mind_record, elim
      with
     | Declarations.PrimRecord _, GlobRef.ConstRef constant ->
-      Global.set_strategy (Conv_oracle.EvalConstRef constant)
-        Conv_oracle.Expand;
+      Redexpr.set_strategy false
+        [ (Conv_oracle.Expand, [ Evaluable.EvalConstRef constant ]) ];
       expand_head_cache := N.Set.add recursor !expand_head_cache
     | _ -> ());
     add_declared recursor scheme_index { ref = elim; algs = scheme_algs }

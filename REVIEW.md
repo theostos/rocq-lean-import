@@ -1,8 +1,8 @@
-# Align the foundation with modern UInt32 and character computations
+# Preserve Lean reducibility hints and genuine opacity
 
-Base: `review/compact-kernel-integration`. Compare against this base, not upstream.
+Base: `review/modern-core-foundation`. Compare against this base, not upstream.
 
-Extend the already integrated UInt32/Char layout with their toNat/validity predeclarations and update the foundation character computations and stdlib imports. This is the later foundation delta, not a replacement for pr/uint32-modern-dump or pr/string-of-list. The imported core fixture exercises Char.ofNatAux and its dependent proof. Requires the compact arithmetic branch below it.
+Read abbreviation, regular-height and opaque-hint export records, and install persistent Rocq strategies. Keep an opaque reducibility hint distinct from a genuinely opaque declaration. This supplies the conversion ordering used on large cslib dependencies such as Int32.toBitVec_not; it does not itself implement a new conversion rule. The NDJSON exporter must preserve the same metadata.
 
 ## Validation
 
