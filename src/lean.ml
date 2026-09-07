@@ -4497,7 +4497,7 @@ type pending_inductive_group = {
   members_rev : ind list;
 }
 
-let finish state =
+let finish ?(completed = true) state =
   let max_univs, cnt =
     N.Map.fold
       (fun _ entry (m, cnt) ->
@@ -4526,7 +4526,9 @@ let finish state =
   in
   Feedback.msg_info
     Pp.(
-      fnl () ++ fnl () ++ str "Done!" ++ fnl () ++ str "- "
+      fnl () ++ fnl ()
+      ++ str (if completed then "Done!" else "Stopped!")
+      ++ fnl () ++ str "- "
       ++ int (N.Map.cardinal !entries)
       ++ str " entries (" ++ int cnt ++ str " possible instances)"
       ++ (if N.Map.exists (fun _ -> function Quot _ -> true | _ -> false) !entries then
@@ -4563,14 +4565,21 @@ let () =
 
 exception TimedOut
 
-let do_line state l =
-  let do_line () = LeanParse.do_line state ~lcnt:!lcnt l in
+let () =
+  CErrors.register_handler (function
+    | TimedOut -> Some Pp.(str "Lean import line timed out.")
+    | _ -> None)
+
+let with_line_timeout act =
   match !timeout with
-  | None -> do_line ()
+  | None -> act ()
   | Some t ->
-    (match Control.timeout (float_of_int t) do_line () with
+    (match Control.timeout (float_of_int t) act () with
     | Ok v -> v
     | Error info -> Exninfo.iraise (TimedOut, info))
+
+let do_line state l =
+  with_line_timeout (fun () -> LeanParse.do_line state ~lcnt:!lcnt l)
 
 let do_line state l =
   let t0 = System.get_time () in
@@ -4595,7 +4604,9 @@ let unfreeze (lib, sum) =
 
 let process_effect state ch ~line_no ~raw ~name act =
   let st = freeze () in
-  match act () with
+  (* Parsing and declaration checking are separate for pending inductive
+     groups; both stages must obey the user's line timeout. *)
+  match with_line_timeout act with
   | () -> Some state
   | exception e ->
     let e = Exninfo.capture e in
@@ -4611,12 +4622,11 @@ let process_effect state ch ~line_no ~raw ~name act =
       Some { state with skips = state.skips + 1 }
     | Stop ->
       close_in ch;
-      finish state;
+      finish ~completed:false state;
       Feedback.msg_info epp;
       None
     | Fail ->
       close_in ch;
-      finish state;
       CErrors.user_err epp
 
 let process_pending state ch = function
