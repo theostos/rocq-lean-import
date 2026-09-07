@@ -1,8 +1,8 @@
-# Register unit-like inductives and simplify their nullary schemes
+# Cache translation by expression and binder context
 
-Base: `review/reducibility-hints`. Compare against this base, not upstream.
+Base: `review/nullary-unit-schemes`. Compare against this base, not upstream.
 
-Register eligible unit-like types, including types restored from a checkpoint. For a nullary constructor, check the branch-only eliminator against the generated dependent scheme type. This fixes Cslib.Automata.NA.FinAcc.instTotalSumUnitFinLoopOfNonemptyElemStart. Constructors with fields and indexed types retain ordinary schemes. Requires the experimental kernel unit-eta rule.
+Reuse translations of shared Lean expression nodes, with context/depth information for open terms and separate caches for context-independent fragments. Memoize relevance inspection and canonicalize binder contexts. Large exported proof DAGs otherwise repeat translation work. Optional cache validation compares cached results with fresh translations; this is an importer optimization, not proof replacement.
 
 ## Validation
 

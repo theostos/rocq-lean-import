@@ -515,6 +515,64 @@ let to_universe map u =
 let sets : Level.t Int.Map.t ref =
   Summary.ref ~name:"lean-set-surrogates" Int.Map.empty
 
+let expression_hash expr = Hashtbl.hash_param 16 128 expr
+
+let translation_hash (expr, depth, context) =
+  Hashtbl.hash_param 16 128 (expression_hash expr, depth, context)
+
+module TranslationCache = Hashtbl.Make (struct
+  type t = LeanExpr.expr * int * int list
+
+  let equal (expr1, depth1, context1) (expr2, depth2, context2) =
+    expr1 == expr2 && Int.equal depth1 depth2
+    && List.equal Int.equal context1 context2
+  let hash = translation_hash
+end)
+
+module ExpressionCache = Hashtbl.Make (struct
+  type t = LeanExpr.expr
+
+  let equal = ( == )
+  let hash = expression_hash
+end)
+
+module PhysicalConstrCache = Hashtbl.Make (struct
+  type t = Constr.t
+
+  let equal = ( == )
+  let hash term = Hashtbl.hash_param 1 1 term
+end)
+
+module ContextCache = Hashtbl.Make (struct
+  type t = Constr.rel_declaration
+
+  let declaration_equal declaration1 declaration2 =
+    match declaration1, declaration2 with
+    | RelDecl.LocalAssum (annot1, ty1), RelDecl.LocalAssum (annot2, ty2) ->
+      Sorts.relevance_equal annot1.Context.binder_relevance
+        annot2.Context.binder_relevance
+      && Constr.equal ty1 ty2
+    | RelDecl.LocalDef (annot1, body1, ty1),
+      RelDecl.LocalDef (annot2, body2, ty2) ->
+      Sorts.relevance_equal annot1.Context.binder_relevance
+        annot2.Context.binder_relevance
+      && Constr.equal body1 body2
+      && Constr.equal ty1 ty2
+    | RelDecl.LocalAssum _, RelDecl.LocalDef _
+    | RelDecl.LocalDef _, RelDecl.LocalAssum _ -> false
+
+  let equal = declaration_equal
+
+  let hash declaration =
+    match declaration with
+    | RelDecl.LocalAssum (annot, ty) ->
+      Hashtbl.hash_param 4 16
+        (0, annot.Context.binder_relevance, ty)
+    | RelDecl.LocalDef (annot, body, ty) ->
+      Hashtbl.hash_param 4 16
+        (1, annot.Context.binder_relevance, body, ty)
+end)
+
 type uconv = {
   map : extended_level N.Map.t;  (** Map from lean names to Coq universes *)
   levels : Level.t Universe.Map.t;
@@ -525,6 +583,15 @@ type uconv = {
           that only occur below an algebraic successor do not need to be exposed
           as parameters of the translated declaration. *)
   graph : UGraph.t;
+  translations : Constr.t TranslationCache.t;
+  context_free_translations : Constr.t ExpressionCache.t;
+  context_free_expressions : bool ExpressionCache.t;
+  loose_bound_ranges : int ExpressionCache.t;
+  contexts : int ContextCache.t;
+  next_context : int ref;
+  translation_calls : int ref;
+  translation_hits : int ref;
+  translation_misses : int ref;
 }
 
 let lean_id = Id.of_string "Lean"
@@ -788,13 +855,42 @@ let with_env_evm rels uconv f x =
   let evd = Evd.from_env env in
   f env evd x
 
+let annotation_trace_count = ref 0
+
+let time_translation_operation label f =
+  if Option.is_empty (Sys.getenv_opt "LEAN_IMPORT_TRANSLATION_TIMINGS") then f ()
+  else
+    let started = Sys.time () in
+    let before = Gc.quick_stat () in
+    Fun.protect f ~finally:(fun () ->
+      let elapsed = Sys.time () -. started in
+      if elapsed >= 0.01 then
+        let after = Gc.quick_stat () in
+        Printf.eprintf
+          "[translation timing] %s cpu=%.3f duration=%.3f major=%d\n%!"
+          label (Sys.time ()) elapsed
+          (after.Gc.major_collections - before.Gc.major_collections))
+
 let to_annot rels n t uconv =
+  incr annotation_trace_count;
+  let trace = Option.has_some (Sys.getenv_opt "LEAN_IMPORT_ANNOT_TRACE") in
+  let () =
+    if trace then
+      Printf.eprintf "[annotation start] %d %s\n%!" !annotation_trace_count
+        (N.to_lean_string n)
+  in
   let r =
-    with_env_evm rels uconv
-      (fun env evd r ->
-        let r = Retyping.relevance_of_type env evd r in
-        EConstr.Unsafe.to_relevance r)
-      (EConstr.of_constr t)
+    time_translation_operation "annotation" (fun () ->
+      with_env_evm rels uconv
+        (fun env evd r ->
+          let r = Retyping.relevance_of_type env evd r in
+          EConstr.Unsafe.to_relevance r)
+        (EConstr.of_constr t))
+  in
+  let () =
+    if trace then
+      Printf.eprintf "[annotation done] %d %s\n%!" !annotation_trace_count
+        (N.to_lean_string n)
   in
   Context.make_annot (N.to_name n) r
 
@@ -822,6 +918,15 @@ let start_uconv univs i =
       map = N.Map.empty;
       levels = Universe.Map.empty;
       direct = Level.Set.empty;
+      translations = TranslationCache.create 251;
+      context_free_translations = ExpressionCache.create 251;
+      context_free_expressions = ExpressionCache.create 251;
+      loose_bound_ranges = ExpressionCache.create 251;
+      contexts = ContextCache.create 251;
+      next_context = ref 0;
+      translation_calls = ref 0;
+      translation_hits = ref 0;
+      translation_misses = ref 0;
     }
   in
   let uconv, set1 = level_of_sets uconv 1 in
@@ -2752,7 +2857,241 @@ let _eta_expand_primitive_record_definition env evd ty body =
       | _ -> body)
     | _ -> body
 
-let rec to_constr =
+let intern_translation_declaration uconv parent declaration =
+  let substitution = List.map Constr.mkMeta parent in
+  let declaration =
+    time_translation_operation "context substitution" (fun () ->
+      RelDecl.map_constr (Vars.substl substitution) declaration)
+  in
+  match time_translation_operation "context lookup" (fun () ->
+      ContextCache.find_opt uconv.contexts declaration) with
+  | Some context -> context
+  | None ->
+    incr uconv.next_context;
+    let context = !(uconv.next_context) in
+    ContextCache.add uconv.contexts declaration context;
+    context
+
+let translation_context uconv env =
+  let rec declarations index collected =
+    match Environ.lookup_rel_ctxt index env with
+    | declaration -> declarations (index + 1) (declaration :: collected)
+    | exception Not_found -> collected
+  in
+  List.fold_left
+    (fun parent declaration ->
+      intern_translation_declaration uconv parent declaration :: parent)
+    [] (declarations 1 [])
+
+let rec loose_bound_range uconv expr =
+  match ExpressionCache.find_opt uconv.loose_bound_ranges expr with
+  | Some range -> range
+  | None ->
+    let range =
+      match expr with
+      | Bound index -> index + 1
+      | Sort _ | Const _ | Nat _ | String _ -> 0
+      | App (function_, argument) ->
+        Stdlib.max (loose_bound_range uconv function_)
+          (loose_bound_range uconv argument)
+      | Let { ty; v; rest; _ } ->
+        Stdlib.max (loose_bound_range uconv ty)
+          (Stdlib.max (loose_bound_range uconv v)
+             (Stdlib.max 0 (loose_bound_range uconv rest - 1)))
+      | Lam (_, _, ty, body) | Pi (_, _, ty, body) ->
+        Stdlib.max (loose_bound_range uconv ty)
+          (Stdlib.max 0 (loose_bound_range uconv body - 1))
+      | Proj (_, _, term) -> loose_bound_range uconv term
+    in
+    ExpressionCache.add uconv.loose_bound_ranges expr range;
+    range
+
+let rec context_free_translation uconv expr =
+  match ExpressionCache.find_opt uconv.context_free_expressions expr with
+  | Some context_free -> context_free
+  | None ->
+    let context_free =
+      match expr with
+      | Bound _ | Sort _ | Const _ | Nat _ | String _ -> true
+      | App (function_, argument) ->
+        let head, _ = decompose_lean_app [] expr in
+        let ordinary_application =
+          match head with
+          | Const (name, _) ->
+            not (N.Map.mem name !projection_aliases)
+            && Option.is_empty (find_mutual_nested_rec_info name)
+          | _ -> true
+        in
+        ordinary_application
+        && context_free_translation uconv function_
+        && context_free_translation uconv argument
+      | Let _ | Lam _ | Pi _ | Proj _ -> false
+    in
+    ExpressionCache.add uconv.context_free_expressions expr context_free;
+    context_free
+
+let rec to_constr env expr uconv =
+  let context = translation_context uconv env in
+  to_constr_in_context env context expr uconv
+
+(* Keep the canonical context alongside the local environment. Recovering it
+   through a physical-key hash table made repeated binder contexts expensive:
+   structurally identical environments necessarily collide in that table. *)
+and to_constr_in_context env context expr uconv =
+  if Option.has_some
+       (Sys.getenv_opt "LEAN_IMPORT_DISABLE_TRANSLATION_CACHE")
+  then to_constr_uncached env context expr uconv
+  else to_constr_cached env context expr uconv
+
+and to_constr_cached env full_context expr uconv =
+  incr uconv.translation_calls;
+  let () =
+    if Option.has_some (Sys.getenv_opt "LEAN_IMPORT_TRANSLATION_TRACE") &&
+       !(uconv.translation_calls) mod 1_000 = 0
+    then
+      let kind =
+        match expr with
+        | Bound _ -> "bound" | Sort _ -> "sort" | Const _ -> "const"
+        | App _ -> "app" | Let _ -> "let" | Lam _ -> "lam" | Pi _ -> "pi"
+        | Proj _ -> "proj" | Nat _ -> "nat" | String _ -> "string"
+      in
+      Printf.eprintf
+        "[translation] cpu=%.3f calls=%d hits=%d misses=%d contexts=%d exact=%d free=%d kind=%s\n%!"
+        (Sys.time ()) !(uconv.translation_calls) !(uconv.translation_hits)
+        !(uconv.translation_misses) !(uconv.next_context)
+        (TranslationCache.length uconv.translations)
+        (ExpressionCache.length uconv.context_free_translations) kind
+  in
+  let () =
+    if Option.has_some (Sys.getenv_opt "LEAN_IMPORT_TRANSLATION_BUCKETS")
+       && !(uconv.translation_calls) mod 32_768 = 0
+    then begin
+      let report name stats =
+        Printf.eprintf
+          "[translation buckets] cpu=%.3f calls=%d %s bindings=%d buckets=%d max_bucket=%d\n%!"
+          (Sys.time ()) !(uconv.translation_calls) name
+          stats.Hashtbl.num_bindings stats.Hashtbl.num_buckets
+          stats.Hashtbl.max_bucket_length
+      in
+      report "exact" (TranslationCache.stats uconv.translations);
+      report "free" (ExpressionCache.stats uconv.context_free_translations);
+      report "loose" (ExpressionCache.stats uconv.loose_bound_ranges);
+      report "context-free" (ExpressionCache.stats uconv.context_free_expressions);
+      report "contexts" (ContextCache.stats uconv.contexts)
+    end
+  in
+  let required_context = loose_bound_range uconv expr in
+  let context_free =
+    Int.equal required_context 0
+    || context_free_translation uconv expr
+  in
+  let context_depth = if context_free then 0 else List.length full_context in
+  let context =
+    if context_free then [] else CList.firstn required_context full_context
+  in
+  let cached =
+    if context_free then
+      ExpressionCache.find_opt uconv.context_free_translations expr
+    else
+      TranslationCache.find_opt uconv.translations
+        (expr, context_depth, context)
+  in
+  match cached with
+  | Some term ->
+    incr uconv.translation_hits;
+    if Option.has_some
+         (Sys.getenv_opt "LEAN_IMPORT_VALIDATE_TRANSLATION_CACHE")
+    then
+      let uconv, fresh = to_constr_uncached env full_context expr uconv in
+      if Constr.equal term fresh then (uconv, term)
+      else
+        let kind =
+          match expr with
+          | Bound _ -> "bound" | Sort _ -> "sort" | Const _ -> "constant"
+          | App _ -> "application" | Let _ -> "let" | Lam _ -> "lambda"
+          | Pi _ -> "product" | Proj _ -> "projection" | Nat _ -> "nat"
+          | String _ -> "string"
+        in
+        let cached_pp, fresh_pp =
+          with_env_evm env uconv
+            (fun env evd () ->
+              ( Printer.pr_constr_env env evd term,
+                Printer.pr_constr_env env evd fresh ))
+            ()
+        in
+        CErrors.user_err
+          Pp.(str "Translation cache mismatch for " ++ str kind
+              ++ str " with required context " ++ int required_context
+              ++ str ", depth " ++ int context_depth
+              ++ str " and key ["
+              ++ prlist_with_sep (fun () -> str "; ") int context
+              ++ str "]" ++ fnl () ++ str "Cached: "
+              ++ cached_pp
+              ++ fnl () ++ str "Fresh: "
+              ++ fresh_pp
+              ++ fnl () ++ str "Cached (raw): "
+              ++ Constr.debug_print term
+              ++ fnl () ++ str "Fresh (raw): "
+              ++ Constr.debug_print fresh)
+    else (uconv, term)
+  | None ->
+    incr uconv.translation_misses;
+    let call = !(uconv.translation_calls) in
+    let deep_trace =
+      Option.has_some (Sys.getenv_opt "LEAN_IMPORT_TRANSLATION_DEEP_TRACE")
+    in
+    let label =
+      if not deep_trace then ""
+      else
+        match expr with
+        | App _ ->
+          (match fst (decompose_lean_app [] expr) with
+          | Const (name, _) -> N.to_lean_string name
+          | _ -> "<application>")
+        | Const (name, _) -> N.to_lean_string name
+        | Bound _ -> "<bound>" | Sort _ -> "<sort>" | Let _ -> "<let>"
+        | Lam _ -> "<lambda>" | Pi _ -> "<product>" | Proj _ -> "<projection>"
+        | Nat _ -> "<nat>" | String _ -> "<string>"
+    in
+    let () =
+      if deep_trace then
+        Printf.eprintf "[translation start] call=%d %s\n%!"
+          call label
+    in
+    let uconv, term = to_constr_uncached env full_context expr uconv in
+    let () =
+      if deep_trace then
+        Printf.eprintf "[translation done] call=%d %s\n%!"
+          call label
+    in
+    let trace_root_cache = deep_trace && Int.equal call 256 in
+    let () =
+      if trace_root_cache then begin
+        let stat = Gc.quick_stat () in
+        Printf.eprintf
+          "[root cache hash start] free=%d exact=%d heap_words=%d live_words=%d\n%!"
+          (ExpressionCache.length uconv.context_free_translations)
+          (TranslationCache.length uconv.translations)
+          stat.Gc.heap_words stat.Gc.live_words;
+        let hash =
+          if context_free then expression_hash expr
+          else translation_hash (expr, context_depth, context)
+        in
+        Printf.eprintf "[root cache hash done] hash=%d\n%!" hash
+      end
+    in
+    if context_free then
+      ExpressionCache.add uconv.context_free_translations expr term
+    else
+      TranslationCache.add uconv.translations
+        (expr, context_depth, context) term;
+    let () =
+      if trace_root_cache then
+        Printf.eprintf "[root cache insertion done]\n%!"
+    in
+    (uconv, term)
+
+and to_constr_uncached =
   let open Constr in
   let ( >>= ) x f uconv =
     let uconv, x = x uconv in
@@ -2761,8 +3100,16 @@ let rec to_constr =
   let get_uconv uconv = (uconv, uconv) in
   let ret x uconv = (uconv, x) in
   let to_annot env n t u = (u, to_annot env n t u) in
-  let push_rel = Environ.push_rel_context_val in
-  fun env -> function
+  let under_binder env context declaration expr uconv =
+    let context =
+      intern_translation_declaration uconv context declaration :: context
+    in
+    let env = Environ.push_rel_context_val declaration env in
+    to_constr_in_context env context expr uconv
+  in
+  fun env context expr ->
+    let translate expr = to_constr_in_context env context expr in
+    match expr with
     | Bound i -> ret (mkRel (i + 1))
     | Sort univ ->
       to_univ_level' univ >>= fun u -> ret (mkSort (sort_of_level u))
@@ -2773,8 +3120,8 @@ let rec to_constr =
         let a, b_expr =
           match app_expr with App (a, b) -> a, b | _ -> assert false
         in
-        to_constr env a >>= fun a ->
-        to_constr env b_expr >>= fun b ->
+        translate a >>= fun a ->
+        translate b_expr >>= fun b ->
         ret (mkApp (a, [| b |]))
       in
       match head with
@@ -2783,7 +3130,7 @@ let rec to_constr =
           let alias = find_projection_alias_for_universes uconv n univs in
           let uconv, translated_args =
             CList.fold_left_map
-              (fun uconv arg -> to_constr env arg uconv)
+              (fun uconv arg -> translate arg uconv)
               uconv args
           in
           let apply_arguments function_ arguments =
@@ -2832,7 +3179,7 @@ let rec to_constr =
             in
             let uconv, args =
               CList.fold_left_map
-                (fun uconv arg -> to_constr env arg uconv)
+                (fun uconv arg -> translate arg uconv)
                 uconv args
             in
             let adapted =
@@ -2857,23 +3204,23 @@ let rec to_constr =
               uconv, term)
       | _ -> translate_plain ())
     | Let { name; ty; v; rest } ->
-      to_constr env ty >>= fun ty ->
+      translate ty >>= fun ty ->
       to_annot env name ty >>= fun name ->
-      to_constr env v >>= fun v ->
-      to_constr (push_rel (LocalDef (name, v, ty)) env) rest >>= fun rest ->
+      translate v >>= fun v ->
+      under_binder env context (LocalDef (name, v, ty)) rest >>= fun rest ->
       ret (mkLetIn (name, v, ty, rest))
     | Lam (_bk, n, a, b) ->
-      to_constr env a >>= fun a ->
+      translate a >>= fun a ->
       to_annot env n a >>= fun n ->
-      to_constr (push_rel (LocalAssum (n, a)) env) b >>= fun b ->
+      under_binder env context (LocalAssum (n, a)) b >>= fun b ->
       ret (mkLambda (n, a, b))
     | Pi (_bk, n, a, b) ->
-      to_constr env a >>= fun a ->
+      translate a >>= fun a ->
       to_annot env n a >>= fun n ->
-      to_constr (push_rel (LocalAssum (n, a)) env) b >>= fun b ->
+      under_binder env context (LocalAssum (n, a)) b >>= fun b ->
       ret (mkProd (n, a, b))
     | Proj (lean_ind, field, c) ->
-      to_constr env c >>= fun c ->
+      translate c >>= fun c ->
       get_uconv >>= fun uconv ->
       (* we retype to get the ind, because otherwise we need the lean
        univs for instantiation
@@ -2881,9 +3228,13 @@ let rec to_constr =
       let c =
         with_env_evm env uconv
           (fun env evd () ->
-            let tc = Retyping.get_type_of env evd (EConstr.of_constr c) in
             let tc =
-              Reductionops.whd_all env evd tc
+              time_translation_operation "projection type" (fun () ->
+                Retyping.get_type_of env evd (EConstr.of_constr c))
+            in
+            let tc =
+              time_translation_operation "projection reduction" (fun () ->
+                Reductionops.whd_all env evd tc)
             in
             let tc_head, args = EConstr.decompose_app evd tc in
             match EConstr.kind evd tc_head with
