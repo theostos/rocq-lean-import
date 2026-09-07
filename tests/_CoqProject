@@ -30,3 +30,4 @@ primitive_record_eliminator.v
 record_valued_definition_eta.v
 nat_deceq.v
 constructor_owner.v
+dependent_sprop_projection.v

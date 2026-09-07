@@ -95,6 +95,7 @@ let project_primitive_record_scheme env (mind, ind_index) body =
   let mib = Global.lookup_mind mind in
   let packet = mib.mind_packets.(ind_index) in
   match packet.mind_record with
+  | Declarations.PrimRecord { has_eta = Declarations.NoEta; _ } -> body
   | Declarations.PrimRecord _ ->
     let nb_lambdas = mib.mind_nparams + 3 in
     let binders, inside = Term.decompose_lambda_n_assum nb_lambdas body in
@@ -1384,10 +1385,10 @@ let unfold_proj_case env evd ~field ~indu ~mib ~mip ~args c =
     Environ.push_rel
       (Context.Rel.Declaration.LocalAssum (self_annot, self_ty)) env
   in
-  let make_case ~params ~field ~ret_ty c =
+  let make_case ~ret_env ~params ~field ~ret_ty c =
     let case_relev =
       EConstr.Unsafe.to_relevance
-        (Retyping.relevance_of_type env_self evd (EConstr.of_constr ret_ty))
+        (Retyping.relevance_of_type ret_env evd (EConstr.of_constr ret_ty))
     in
     let p = ([| self_annot |], ret_ty) in
     let branch_nas =
@@ -1398,8 +1399,14 @@ let unfold_proj_case env evd ~field ~indu ~mib ~mip ~args c =
       (ci, u, params, (p, case_relev), Constr.NoInvert, c, [| branch |])
   in
   let params_self = Array.map (Vars.lift 1) params in
+  let env_inner =
+    Environ.push_rel
+      (Context.Rel.Declaration.LocalAssum
+         (self_annot, Vars.lift 1 self_ty))
+      env_self
+  in
   let ret_ty =
-    let ctor = Constr.mkConstructU (((fst ind, 0), 1), u) in
+    let ctor = Constr.mkConstructU ((ind, 1), u) in
     let ctor_applied = Constr.mkApp (ctor, params) in
     let rec get_field_type i ty =
       match Constr.kind ty with
@@ -1407,7 +1414,8 @@ let unfold_proj_case env evd ~field ~indu ~mib ~mip ~args c =
         if i = field then t
         else
           let previous =
-            make_case ~params:params_self ~field:i ~ret_ty:t (Constr.mkRel 1)
+            make_case ~ret_env:env_inner ~params:params_self ~field:i
+              ~ret_ty:(Vars.lift 1 t) (Constr.mkRel 1)
           in
           get_field_type (i + 1) (Vars.subst1 previous rest)
       | _ -> assert false
@@ -1420,7 +1428,7 @@ let unfold_proj_case env evd ~field ~indu ~mib ~mip ~args c =
     in
     get_field_type 0 (Vars.lift 1 ctor_ty)
   in
-  make_case ~params ~field ~ret_ty c
+  make_case ~ret_env:env_self ~params ~field ~ret_ty c
 
 let lcnt = ref 0
 
@@ -3809,18 +3817,13 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
                  match (fields, Sorts.is_sprop sort, is_recursive) with
                  | [], true, _ -> (None, [], ctys, [])
                  | _ :: _, false, false ->
-                   if
-                     List.exists
-                       (fun (na, _) ->
-                         na.Context.binder_relevance
-                         == EConstr.ERelevance.relevant)
-                       fields
-                   then
-                     ( Some (Some [| default_proj_id |]),
-                       fields,
-                       [ cty' ],
-                       field_names )
-                   else (None, [], ctys, [])
+                   (* A [Type]-valued Lean structure may contain only proof
+                      fields.  Rocq still supports primitive projections for
+                      it, but deliberately gives it no record eta rule. *)
+                   ( Some (Some [| default_proj_id |]),
+                     fields,
+                     [ cty' ],
+                     field_names )
                  | [], false, _ -> (None, [], ctys, [])
                  | _ :: _, true, false ->
                    if

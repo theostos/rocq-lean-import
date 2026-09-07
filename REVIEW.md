@@ -1,8 +1,8 @@
-# Instantiate an inductive before a requested constructor
+# Preserve dependent field types and proof-only records
 
-Base: `review/strict-import-errors`. Compare against this base, not upstream.
+Base: `review/constructor-owners`. Compare against this base, not upstream.
 
-Index constructors by their owning Lean inductive and rebuild the index when loading a checkpoint. Box.mk can be requested before the matching Box universe instance; previously it was looked up as a standalone declaration. The real cslib failure was Lean.Server.Watchdog.eraseFileWorker, missing Lean.JsonRpc.ResponseError.mk. Includes the 74-line Lean export.
+Construct fallback projection types in the correct local telescope and compute relevance in that context. Keep primitive projections for Type-valued records containing only proof fields, without assuming such records have eta. This extends the earlier projection-relevance PR; the focused fixture contains a proof field whose type depends on an earlier field.
 
 ## Validation
 
