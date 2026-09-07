@@ -1,8 +1,8 @@
-# Build nested recursor adapters with structural fix and match
+# Use compact kernel arithmetic instead of proof transports
 
-Base: `review/dependent-projections`. Compare against this base, not upstream.
+Base: `review/nested-fix-match`. Compare against this base, not upstream.
 
-Replace the All/AllForall-based folding path with direct structural recursion through List, Array, Option, Prod and eligible records, including mutual blocks and auxiliary recursors. This addresses Lean.Meta.DiscrTree.Trie.casesOn. The branch is the incremental replacement on the integrated old stack, not another copy of the old nested-containers PR.
+Register the generic Lean Nat encoding and operations with the experimental kernel. Keep large literals compact and remove the proof-certificate/application-transport path it replaces. Register checked division and modulus workers when they are declared. Motivating failures include Int32.toInt_lt and Int32.ofInt_tdiv. Requires the Rocq review stack; this is not a stock-Rocq PR.
 
 ## Validation
 

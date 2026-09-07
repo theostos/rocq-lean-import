@@ -21,10 +21,7 @@ nested_record_eligibility.v
 sprop_record_scheme.v
 string_of_list.v
 lowercase_hex.v
-large_nat_conversion.v
 char_of_nat.v
-proof_producing_nat_sub.v
-proof_producing_nat_comparisons.v
 compact_nat.v
 primitive_record_eliminator.v
 record_valued_definition_eta.v
