@@ -1,8 +1,8 @@
-# Cache translation by expression and binder context
+# Store parser graphs in chunked indices and indexed checkpoints
 
-Base: `review/nullary-unit-schemes`. Compare against this base, not upstream.
+Base: `review/translation-sharing`. Compare against this base, not upstream.
 
-Reuse translations of shared Lean expression nodes, with context/depth information for open terms and separate caches for context-independent fragments. Memoize relevance inspection and canonicalize binder contexts. Large exported proof DAGs otherwise repeat translation work. Optional cache validation compares cached results with fresh translations; this is an importer optimization, not proof replacement.
+Use persistent chunks for parser tables and serialize expression edges as integer references. Pack ancestor state and restore it lazily, preserving entry/parser sharing and supported legacy formats. This addresses checkpoint memory peaks in the multi-million-line cslib run. Tests cover DAG aliases, metadata, append persistence and malformed indexed data. Atomic promotion and resource guards live in the arena repository.
 
 ## Validation
 

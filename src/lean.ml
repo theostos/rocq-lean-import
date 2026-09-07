@@ -4624,37 +4624,257 @@ let do_input state ~from ~until ch =
 
 let pstate = Summary.ref ~name:"lean-parse-state" LeanParse.empty_state
 
-let lean_obj =
-  let cache
+type packed_lean_state = {
+  state_format : int;
+  state_digest : string;
+  state_blob : string;
+}
+
+let packed_state_format = 3
+
+let pending_packed_state =
+  Summary.ref ~name:"lean-pending-packed-state" None
+
+type lean_state_v1 =
+  LeanParse.legacy_parsing_state
+  * Level.t Int.Map.t
+  * instantiation Int.Map.t N.Map.t
+  * entry N.Map.t
+  * ind list N.Map.t
+  * squashy N.Map.t
+  * int N.Map.t
+
+type ('parser, 'entry, 'ind) lean_state_payload =
+  'parser
+  * Level.t Int.Map.t
+  * instantiation Int.Map.t N.Map.t
+  * 'entry N.Map.t
+  * 'ind list N.Map.t
+  * squashy N.Map.t
+  * int N.Map.t
+  * N.Set.t
+  * projection_alias Int.Map.t N.Map.t
+  * MutInd.t list
+  * MutInd.t list
+  * MutInd.t list
+  * MutInd.t list
+  * mutual_nested_rec_info N.Map.t
+
+type lean_state = (LeanParse.parsing_state, entry, ind) lean_state_payload
+type legacy_lean_state = (LeanParse.legacy_parsing_state, entry, ind) lean_state_payload
+type indexed_lean_state =
+  (LeanParse.Checkpoint.t, LeanParse.Checkpoint.saved_entry,
+   LeanParse.Checkpoint.saved_ind) lean_state_payload
+
+let encode_indexed_lean_state
+    ( parser, sets, declared, entries, mutual_entries, squash_info, heights,
+      expand_head, projection_aliases, arrays, prods, lists, options,
+      mutual_nested_rec_info : lean_state ) : indexed_lean_state =
+  let module C = LeanParse.Checkpoint in
+  let parser, (entries, mutual_entries) = C.pack parser (fun save ->
+    N.Map.map (C.save_entry save) entries,
+    N.Map.map (List.map (C.save_ind save)) mutual_entries)
+  in
+  ( parser, sets, declared, entries, mutual_entries, squash_info, heights,
+    expand_head, projection_aliases, arrays, prods, lists, options,
+    mutual_nested_rec_info )
+
+let decode_indexed_lean_state
+    ( parser, sets, declared, entries, mutual_entries, squash_info, heights,
+      expand_head, projection_aliases, arrays, prods, lists, options,
+      mutual_nested_rec_info : indexed_lean_state ) : lean_state =
+  let module C = LeanParse.Checkpoint in
+  let parser, load = C.unpack parser in
+  ( parser, sets, declared, N.Map.map (C.load_entry load) entries,
+    N.Map.map (List.map (C.load_ind load)) mutual_entries, squash_info, heights,
+    expand_head, projection_aliases, arrays, prods, lists, options,
+    mutual_nested_rec_info )
+
+let migrate_legacy_lean_state
+    ( parser, sets, declared, entries, mutual_entries, squash_info, heights,
+      expand_head, projection_aliases, arrays, prods, lists, options,
+      mutual_nested_rec_info : legacy_lean_state ) : lean_state =
+  ( LeanParse.migrate_legacy_state parser,
+    sets, declared, entries, mutual_entries, squash_info, heights,
+    expand_head, projection_aliases, arrays, prods, lists, options,
+    mutual_nested_rec_info )
+
+let cache_lean_state
+    ( pstatev,
+      setsv,
+      declaredv,
+      entriesv,
+      mutual_entriesv,
+      squash_infov,
+      heightv,
+      expand_headv,
+      projection_aliasesv,
+      array_mindsv,
+      prod_mindsv,
+      list_mindsv,
+      option_mindsv,
+      mutual_nested_rec_infov : lean_state ) =
+  pstate := pstatev;
+  sets := setsv;
+  declared := declaredv;
+  entries := entriesv;
+  constructor_owners := N.Map.fold
+    (fun _ entry owners -> match entry with
+      | Ind ind -> index_constructors ind owners
+      | Def _ | Ax _ | Quot _ -> owners)
+    entriesv N.Map.empty;
+  mutual_entries := mutual_entriesv;
+  squash_info := squash_infov;
+  height_cache := heightv;
+  expand_head_cache := expand_headv;
+  projection_aliases := projection_aliasesv;
+  array_minds := array_mindsv;
+  prod_minds := prod_mindsv;
+  list_minds := list_mindsv;
+  option_minds := option_mindsv;
+  mutual_nested_rec_info := mutual_nested_rec_infov;
+  pending_packed_state := None
+
+let invalid_legacy_lean_state () =
+  CErrors.user_err Pp.(str "Unsupported legacy Lean importer state.")
+
+(* The original object tag was not versioned.  Accept the two schemas that
+   were written before V2, but inspect the tuple representation before casting
+   it: destructuring a payload with the wrong arity is unsafe. *)
+let cache_legacy_lean_state (raw : Obj.t) =
+  if Obj.is_int raw || not (Int.equal (Obj.tag raw) 0) then
+    invalid_legacy_lean_state ();
+  match Obj.size raw with
+  | 7 ->
+    let ( pstatev,
+          setsv,
+          declaredv,
+          entriesv,
+          mutual_entriesv,
+          squash_infov,
+          heightv ) : lean_state_v1 = Obj.obj raw
+    in
+    cache_lean_state @@ migrate_legacy_lean_state
       ( pstatev,
         setsv,
         declaredv,
         entriesv,
         mutual_entriesv,
         squash_infov,
-        heightv ) =
-    pstate := pstatev;
-    sets := setsv;
-    declared := declaredv;
-    entries := entriesv;
-    constructor_owners := N.Map.fold
-      (fun _ entry owners -> match entry with
-        | Ind ind -> index_constructors ind owners
-        | Def _ | Ax _ | Quot _ -> owners)
-      entriesv N.Map.empty;
-    mutual_entries := mutual_entriesv;
-    squash_info := squash_infov;
-    height_cache := heightv;
-    ()
-  in
+        heightv,
+        N.Set.empty,
+        N.Map.empty,
+        [],
+        [],
+        [],
+        [],
+        N.Map.empty )
+  | 14 ->
+    cache_lean_state (migrate_legacy_lean_state (Obj.obj raw : legacy_lean_state))
+  | _ -> invalid_legacy_lean_state ()
+
+(* Keep the original object declaration as a narrow migration bridge.  New
+   checkpoints use the packed object below and retain only a marshalled byte
+   string for each ancestor, instead of retaining every ancestor's expanded
+   parser graph. *)
+let _legacy_lean_obj =
   let open Libobject in
   declare_object
     {
       (default_object "LEAN-IMPORT-STATE") with
-      cache_function = cache;
-      load_function = (fun _ v -> cache v);
+      cache_function = cache_legacy_lean_state;
+      load_function = (fun _ v -> cache_legacy_lean_state v);
       classify_function = (fun _ -> Keep);
     }
+
+let queue_packed_state state = pending_packed_state := Some state
+
+let packed_lean_obj =
+  let open Libobject in
+  declare_object
+    {
+      (default_object "LEAN-IMPORT-STATE-V2") with
+      (* [import] has already installed this state before [Lib.add_leaf].
+         Queue it only when Rocq loads or re-caches the persistent object. *)
+      cache_function = (fun _ -> ());
+      load_function = (fun _ state -> queue_packed_state state);
+      classify_function = (fun _ -> Keep);
+    }
+
+let trace_checkpoint stage =
+  if Option.has_some (Sys.getenv_opt "LEAN_IMPORT_CHECKPOINT_STATS") then
+    let gc = Gc.quick_stat () in
+    Printf.eprintf
+      "[lean checkpoint] %s cpu=%.3f heap_words=%d major_collections=%d\n%!"
+      stage (Sys.time ()) gc.Gc.heap_words gc.Gc.major_collections
+
+let pack_lean_state state =
+  (* Conversion can leave transient closures and a fragmented heap. Reclaim them
+     at the checkpoint boundary before Marshal allocates its sharing table
+     and output buffers alongside the persistent importer state. *)
+  trace_checkpoint "before checkpoint GC";
+  Gc.compact ();
+  trace_checkpoint "before indexed encoding";
+  let state = encode_indexed_lean_state state in
+  trace_checkpoint "after indexed encoding";
+  (* Drop the temporary reverse indices before Marshal builds its own table. *)
+  Gc.compact ();
+  trace_checkpoint "before pack";
+  (* Marshal buffers its output even for channels. Writing it out first avoids
+     keeping those buffers alongside the final OCaml string. The on-disk bytes
+     and sharing flags remain identical to [Marshal.to_string state []]. *)
+  let temp_dir = Sys.getenv_opt "LEAN_IMPORT_CHECKPOINT_TMP_DIR" in
+  let path, output =
+    Filename.open_temp_file ?temp_dir ~mode:[Open_binary]
+      "lean-import-state-" ".marshal"
+  in
+  let state_blob =
+    Fun.protect
+      ~finally:(fun () ->
+        close_out_noerr output;
+        try Sys.remove path with Sys_error _ -> ())
+      (fun () ->
+        Marshal.to_channel output state [];
+        close_out output;
+        trace_checkpoint "after checkpoint file write";
+        let input = open_in_bin path in
+        Fun.protect ~finally:(fun () -> close_in_noerr input)
+          (fun () -> really_input_string input (in_channel_length input)))
+  in
+  trace_checkpoint "after pack";
+  {
+    state_format = packed_state_format;
+    state_digest = Digest.to_hex (Digest.string state_blob);
+    state_blob;
+  }
+
+let force_packed_state () =
+  match !pending_packed_state with
+  | None -> ()
+  | Some { state_format; state_digest; state_blob } ->
+    if state_format < 1 || state_format > packed_state_format then
+      CErrors.user_err
+        Pp.(str "Unsupported packed Lean importer state format "
+            ++ int state_format ++ str ".");
+    let actual_digest = Digest.to_hex (Digest.string state_blob) in
+    if not (String.equal state_digest actual_digest) then
+      CErrors.user_err Pp.(str "Corrupted packed Lean importer state.");
+    trace_checkpoint "before unpack";
+    let state =
+      try
+        match state_format with
+        | 1 ->
+          migrate_legacy_lean_state
+            (Marshal.from_string state_blob 0 : legacy_lean_state)
+        | 2 -> (Marshal.from_string state_blob 0 : lean_state)
+        | 3 -> decode_indexed_lean_state
+            (Marshal.from_string state_blob 0 : indexed_lean_state)
+        | _ -> assert false
+      with (Failure _ | Invalid_argument _) ->
+        CErrors.user_err Pp.(str "Invalid packed Lean importer state.")
+    in
+    cache_lean_state state;
+    trace_checkpoint "after unpack"
 
 let register_existing_unit_like () =
   let inductives =
@@ -4672,19 +4892,36 @@ let register_existing_unit_like () =
   Indset_env.iter register_unit_like_if_applicable inductives
 
 let import ~from ~until f =
-  register_existing_unit_like ();
+  let () =
+    if Option.has_some (Sys.getenv_opt "LEAN_IMPORT_EXCEPTION_BACKTRACE") then
+      Printexc.record_backtrace true
+  in
+  force_packed_state ();
   lcnt := 1;
+  (* Checkpoint files can have been produced by an older importer.  Revisit
+     already declared inductives so newly supported unit-like encodings are
+     available before conversion resumes. *)
+  register_existing_unit_like ();
   (* silence the definition messages from Coq *)
   let { pstate = pstatev } =
     Flags.silently (fun () ->
         do_input { pstate = !pstate; skips = 0 } ~from ~until (open_in f)) ()
   in
-  Lib.add_leaf
-    (lean_obj
-       ( pstatev,
-         !sets,
-         !declared,
-         !entries,
-         !mutual_entries,
-         !squash_info,
-         !height_cache ))
+  let state =
+    ( pstatev,
+      !sets,
+      !declared,
+      !entries,
+      !mutual_entries,
+      !squash_info,
+      !height_cache,
+      !expand_head_cache,
+      !projection_aliases,
+      !array_minds,
+      !prod_minds,
+      !list_minds,
+      !option_minds,
+      !mutual_nested_rec_info )
+  in
+  cache_lean_state state;
+  Lib.add_leaf (packed_lean_obj (pack_lean_state state))
