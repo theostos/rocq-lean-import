@@ -390,29 +390,6 @@ judgmentally equal to the Lean body, and Rocq checks it as the definition is
 declared.  This prevents a conversion against a record constructor from
 eagerly evaluating an unrelated recursive computation hidden in the result.
 
-## Closed natural-number conversion certificates
-
-Large Lean natural numbers are compact kernel values.  Expanding the same
-values through Rocq's inductive `Nat` during conversion can take gigabytes;
-for example, checking that `18446744073709551616` is `2 ^ 64` used to exhaust
-memory.
-
-The importer therefore represents large literals as `Nat_of_N` applied to a
-binary `N`.  When conversion finds two closed `Nat` expressions built from
-zero, successor, `Nat_of_N`, addition, multiplication, or exponentiation, it
-evaluates them with Zarith while constructing a `NatCertificate` proof for
-every evaluation step.  If both sides produce the same binary value, a Rocq
-lemma derives their Lean equality and transports the surrounding `SProp`
-proof to the expected type.
-
-The OCaml evaluation is only a performance hint: its result is accepted only
-when the generated certificate type-checks in the Rocq kernel.  This adds no
-axiom, reduction rule, or theorem-specific replacement proof.  Unsupported,
-open, or excessively large expressions are left to ordinary Rocq conversion.
-The current transport layer handles closed arithmetic differences inside
-`SProp`; symbolic computations blocked on variables remain a separate
-conversion problem.
-
 # Experimental results
 
 All times are on my laptop, which may have caused variance through
@@ -492,20 +469,19 @@ Off by default, this may be useful for debugging if `Lean Import`
 misdetects whether Lean would allow unrestricted elimination for some
 inductive type.
 
-## Lean Skip Errors
+## Lean Error Mode
 
-Off by default. With it on, when an error is encountered, skip the
-failed line and keep going.
+`Set Lean Error Mode "Fail".` (the default) aborts on an import error.
+`"Stop"` returns a partial import without raising an error; `"Skip"` skips
+the failed entry and continues, including after timeouts.
 
-Useful to tell how much the current system can handle.
-
-Note that timeouts and interrupts are also absorbed by this option. If
-you turn it on and start loading mathlib, then change your mind and
-decide to stop, you will need to kill the Coq process.
+For a complete verification, use `"Fail"` and
+`Unset Lean Skip Missing Quotient.` The latter disables the separate option
+that otherwise permits skipping unsupported quotients.
 
 ## Lean Line Timeout
 
 An integer option, off by default. Use `Set Lean Line Timeout 10.` to
-cause a failure whenever some entry takes more than 10s. Combined with
-`Lean Skip Errors`, this allows processing all the entries which do
-not depend on something that takes more than 10s.
+limit each parsing or declaration-checking action to 10 seconds. This also
+covers the translation and checking of a pending mutual inductive block.
+A timeout follows `Lean Error Mode`, just like other import errors.

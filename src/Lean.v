@@ -1,4 +1,5 @@
-From Stdlib Require ZArith NArith Lia ZifyBool Uint63.
+From Stdlib Require BinInt BinNat Nnat Znat Lia ZifyBool.
+From Corelib Require Uint63Axioms.
 Declare ML Module "coq-lean-import.plugin".
 
 Set Universe Polymorphism.
@@ -95,6 +96,7 @@ End Quot.
 Inductive Nat := Nat_zero : Nat | Nat_succ : Nat -> Nat.
 
 Register Nat as lean.Nat.
+Register Nat as kernel.ind_peano_nat.
 
 Fixpoint double (n : Nat) : Nat :=
   match n with
@@ -103,6 +105,7 @@ Fixpoint double (n : Nat) : Nat :=
   end.
 
 Register double as lean.Nat_double.
+Register double as kernel.peano_nat_double.
 
 Declare Scope Nat_scope.
 Delimit Scope Nat_scope with Nat.
@@ -141,7 +144,7 @@ Inductive Decidable (p : SProp) : Type :=
 Register Decidable as lean.Decidable.
 
 Section nat_notation.
-  Import ZifyClasses ZArith NArith.
+  Import ZifyClasses BinInt BinNat Nnat Znat.
   Fixpoint nat_of_Nat (n : Nat) : nat :=
     match n with
     | Nat_zero => 0
@@ -326,134 +329,26 @@ Proof.
 Defined.
 
 Register Nat_add as lean.Nat_add.
+Register Nat_add as kernel.peano_nat_add.
 Register Nat_mul as lean.Nat_mul.
+Register Nat_mul as kernel.peano_nat_mul.
 Register Nat_pow as lean.Nat_pow.
+Register Nat_pow as kernel.peano_nat_pow.
 Register Nat_pred as lean.Nat_pred.
 Register Nat_sub as lean.Nat_sub.
+Register Nat_sub as kernel.peano_nat_sub.
 Register Nat_beq as lean.Nat_beq.
+Register Nat_beq as kernel.peano_nat_beq.
 Register Nat_ble as lean.Nat_ble.
+Register Nat_ble as kernel.peano_nat_ble.
 Register Nat_blt as lean.Nat_blt.
 Register Nat_decEq as lean.Nat_decEq.
 
-Import NArith.
+Import BinNat.
 
-(** A proof-producing bridge for closed arithmetic.
-
-    The importer evaluates closed [Nat] expressions with Zarith, but the
-    result is never trusted by the Rocq kernel.  Instead it builds a value of
-    [NatCertificate x n], using the lemmas below for each operation it
-    evaluates.  Two expressions reflected to the same binary [N] can then be
-    related by [NatCertificate_equal], and [Nat_transport_sprop] moves a proof
-    across that checked equality. *)
-Definition NatCertificate (x : Nat) (n : N) : Prop :=
-  Logic.eq (N_of_Nat x) n.
-
-Lemma nat_of_Nat_add_logic (a b : Nat) :
-  Logic.eq (nat_of_Nat (Nat_add a b))
-    (nat_of_Nat a + nat_of_Nat b)%nat.
-Proof.
-  induction b as [|b IH].
-  - cbn [Nat_add nat_of_Nat]. now rewrite PeanoNat.Nat.add_0_r.
-  - cbn [Nat_add nat_of_Nat].
-    now rewrite IH, PeanoNat.Nat.add_succ_r.
-Qed.
-
-Lemma nat_of_Nat_mul_logic (a b : Nat) :
-  Logic.eq (nat_of_Nat (Nat_mul a b))
-    (nat_of_Nat a * nat_of_Nat b)%nat.
-Proof.
-  induction b as [|b IH].
-  - cbn [Nat_mul nat_of_Nat]. now rewrite PeanoNat.Nat.mul_0_r.
-  - cbn [Nat_mul nat_of_Nat].
-    rewrite nat_of_Nat_add_logic, IH, PeanoNat.Nat.mul_succ_r.
-    reflexivity.
-Qed.
-
-Lemma nat_of_Nat_pow_logic (a b : Nat) :
-  Logic.eq (nat_of_Nat (Nat_pow a b))
-    (PeanoNat.Nat.pow (nat_of_Nat a) (nat_of_Nat b)).
-Proof.
-  induction b as [|b IH].
-  - reflexivity.
-  - cbn [Nat_pow nat_of_Nat].
-    rewrite nat_of_Nat_mul_logic, IH, PeanoNat.Nat.pow_succ_r.
-    apply PeanoNat.Nat.mul_comm.
-    apply PeanoNat.Nat.le_0_l.
-Qed.
-
-Lemma nat_of_Nat_pred_logic (a : Nat) :
-  Logic.eq (nat_of_Nat (Nat_pred a)) (PeanoNat.Nat.pred (nat_of_Nat a)).
-Proof. destruct a; reflexivity. Qed.
-
-Lemma nat_of_Nat_sub_logic (a b : Nat) :
-  Logic.eq (nat_of_Nat (Nat_sub a b))
-    (nat_of_Nat a - nat_of_Nat b)%nat.
-Proof.
-  induction b as [|b IH].
-  - now rewrite PeanoNat.Nat.sub_0_r.
-  - cbn [Nat_sub nat_of_Nat].
-    rewrite nat_of_Nat_pred_logic, IH.
-    symmetry; apply PeanoNat.Nat.sub_succ_r.
-Qed.
-
-Lemma N_of_Nat_add_logic (a b : Nat) :
-  Logic.eq (N_of_Nat (Nat_add a b))
-    (N_of_Nat a + N_of_Nat b)%N.
-Proof.
-  unfold N_of_Nat.
-  rewrite nat_of_Nat_add_logic, Nat2N.inj_add.
-  reflexivity.
-Qed.
-
-Lemma N_of_Nat_mul_logic (a b : Nat) :
-  Logic.eq (N_of_Nat (Nat_mul a b))
-    (N_of_Nat a * N_of_Nat b)%N.
-Proof.
-  unfold N_of_Nat.
-  rewrite nat_of_Nat_mul_logic, Nat2N.inj_mul.
-  reflexivity.
-Qed.
-
-Lemma N_of_Nat_pow_logic (a b : Nat) :
-  Logic.eq (N_of_Nat (Nat_pow a b))
-    (N_of_Nat a ^ N_of_Nat b)%N.
-Proof.
-  unfold N_of_Nat.
-  rewrite nat_of_Nat_pow_logic, Nat2N.inj_pow.
-  reflexivity.
-Qed.
-
-Lemma N_of_Nat_sub_logic (a b : Nat) :
-  Logic.eq (N_of_Nat (Nat_sub a b))
-    (N_of_Nat a - N_of_Nat b)%N.
-Proof.
-  unfold N_of_Nat.
-  rewrite nat_of_Nat_sub_logic, Nat2N.inj_sub.
-  reflexivity.
-Qed.
-
-Lemma NatCertificate_zero : NatCertificate Nat_zero 0%N.
-Proof. reflexivity. Qed.
-
-Lemma nat2Natid_logic (n : nat) :
-  Logic.eq (nat_of_Nat (Nat_of_nat n)) n.
-Proof.
-  induction n as [|n IH]; cbn.
-  - reflexivity.
-  - now rewrite IH.
-Qed.
-
-Lemma NatCertificate_of_N (n : N) :
-  NatCertificate (Nat_of_N n) n.
-Proof.
-  unfold NatCertificate, N_of_Nat, Nat_of_N.
-  rewrite nat2Natid_logic, N2Nat.id.
-  reflexivity.
-Qed.
 
 (** Fused binary decoding exposes only the constructors demanded by the
-    consumer.  In contrast, [Nat_of_nat (N.to_nat n)] first allocates the
-    complete unary intermediate before Lean's [Nat] can be inspected. *)
+    consumer, without first allocating a unary [nat] intermediate. *)
 Fixpoint CompactPos (p : positive) : Nat :=
   match p with
   | xH => Nat_succ Nat_zero
@@ -467,260 +362,19 @@ Definition CompactNat (n : N) : Nat :=
   | Npos p => CompactPos p
   end.
 
-Lemma NatCertificate_succ (x : Nat) (n : N) :
-  NatCertificate x n -> NatCertificate (Nat_succ x) (N.succ n).
-Proof.
-  unfold NatCertificate, N_of_Nat.
-  cbn [nat_of_Nat].
-  intro H.
-  now rewrite Nat2N.inj_succ, H.
-Qed.
-
-Import Lia.
-
-Lemma nat_of_Nat_double_logic (x : Nat) :
-  Logic.eq (nat_of_Nat (double x)) (2 * nat_of_Nat x)%nat.
-Proof.
-  induction x as [|x IH]; cbn [double nat_of_Nat].
-  - reflexivity.
-  - rewrite IH. lia.
-Qed.
-
-Lemma NatCertificate_double (x : Nat) (n : N) :
-  NatCertificate x n -> NatCertificate (double x) (2 * n)%N.
-Proof.
-  unfold NatCertificate, N_of_Nat.
-  intro H.
-  rewrite nat_of_Nat_double_logic, Nat2N.inj_mul, H.
-  reflexivity.
-Qed.
-
-Lemma NatCertificate_CompactPos (p : positive) :
-  NatCertificate (CompactPos p) (Npos p).
-Proof.
-  induction p as [p IH|p IH|]; cbn [CompactPos].
-  - change
-      (NatCertificate (Nat_succ (double (CompactPos p)))
-         (N.succ (2 * Npos p)%N)).
-    apply NatCertificate_succ.
-    exact (NatCertificate_double _ _ IH).
-  - change
-      (NatCertificate (double (CompactPos p)) (2 * Npos p)%N).
-    exact (NatCertificate_double _ _ IH).
-  - unfold NatCertificate, N_of_Nat. reflexivity.
-Qed.
-
-Lemma NatCertificate_CompactNat (n : N) :
-  NatCertificate (CompactNat n) n.
-Proof.
-  destruct n as [|p]; cbn [CompactNat].
-  - exact NatCertificate_zero.
-  - exact (NatCertificate_CompactPos p).
-Qed.
-
-(** [CompactNat] is kept transparent so weak-head reduction can reveal one
-    constructor at a time without first materializing the complete unary
-    normal form. *)
-
-Lemma NatCertificate_add (a b : Nat) (na nb : N) :
-  NatCertificate a na -> NatCertificate b nb ->
-  NatCertificate (Nat_add a b) (na + nb)%N.
-Proof.
-  unfold NatCertificate.
-  intros Ha Hb.
-  rewrite N_of_Nat_add_logic, Ha, Hb.
-  reflexivity.
-Qed.
-
-Lemma NatCertificate_mul (a b : Nat) (na nb : N) :
-  NatCertificate a na -> NatCertificate b nb ->
-  NatCertificate (Nat_mul a b) (na * nb)%N.
-Proof.
-  unfold NatCertificate.
-  intros Ha Hb.
-  rewrite N_of_Nat_mul_logic, Ha, Hb.
-  reflexivity.
-Qed.
-
-Lemma NatCertificate_pow (a b : Nat) (na nb : N) :
-  NatCertificate a na -> NatCertificate b nb ->
-  NatCertificate (Nat_pow a b) (na ^ nb)%N.
-Proof.
-  unfold NatCertificate.
-  intros Ha Hb.
-  rewrite N_of_Nat_pow_logic, Ha, Hb.
-  reflexivity.
-Qed.
-
-Lemma NatCertificate_sub (a b : Nat) (na nb : N) :
-  NatCertificate a na -> NatCertificate b nb ->
-  NatCertificate (Nat_sub a b) (na - nb)%N.
-Proof.
-  unfold NatCertificate.
-  intros Ha Hb.
-  rewrite N_of_Nat_sub_logic, Ha, Hb.
-  reflexivity.
-Qed.
-
-Lemma Nat2natid_logic (n : Nat) :
-  Logic.eq (Nat_of_nat (nat_of_Nat n)) n.
-Proof.
-  induction n as [|n IH]; cbn.
-  - reflexivity.
-  - now rewrite IH.
-Qed.
-
-Lemma Nat_of_N_N_of_Nat_logic (n : Nat) :
-  Logic.eq (Nat_of_N (N_of_Nat n)) n.
-Proof.
-  cbv [Nat_of_N N_of_Nat].
-  rewrite Nat2N.id.
-  apply Nat2natid_logic.
-Qed.
-
-Lemma NatCertificate_equal (a b : Nat) (n : N) :
-  NatCertificate a n -> NatCertificate b n -> eq a b.
-Proof.
-  unfold NatCertificate.
-  intros Ha Hb.
-  assert (Logic.eq a b) as Hab.
-  { apply (f_equal Nat_of_N) in Ha.
-    apply (f_equal Nat_of_N) in Hb.
-    rewrite !Nat_of_N_N_of_Nat_logic in Ha, Hb.
-    exact (Logic.eq_trans Ha (Logic.eq_sym Hb)). }
-  destruct Hab.
-  constructor.
-Qed.
-
-(** A checked bridge from Lean's [Bool] to Rocq's [bool].  Like
-    [NatCertificate], it lets the importer evaluate compact host values while
-    requiring a Rocq proof for every result. *)
-Definition bool_of_Bool (b : Bool) : bool :=
-  match b with
-  | Bool_false => false
-  | Bool_true => true
-  end.
-
-Definition Bool_of_bool (b : bool) : Bool :=
-  if b then Bool_true else Bool_false.
-
-Definition BoolCertificate (x : Bool) (b : bool) : Prop :=
-  Logic.eq (bool_of_Bool x) b.
-
-Lemma Bool_of_bool_bool_of_Bool_logic (b : Bool) :
-  Logic.eq (Bool_of_bool (bool_of_Bool b)) b.
-Proof. destruct b; reflexivity. Qed.
-
-Lemma BoolCertificate_of_bool (b : bool) :
-  BoolCertificate (Bool_of_bool b) b.
-Proof. destruct b; reflexivity. Qed.
-
-Lemma BoolCertificate_equal (a b : Bool) (value : bool) :
-  BoolCertificate a value -> BoolCertificate b value -> eq a b.
-Proof.
-  unfold BoolCertificate.
-  intros Ha Hb.
-  assert (Logic.eq a b) as Hab.
-  { apply (f_equal Bool_of_bool) in Ha.
-    apply (f_equal Bool_of_bool) in Hb.
-    rewrite !Bool_of_bool_bool_of_Bool_logic in Ha, Hb.
-    exact (Logic.eq_trans Ha (Logic.eq_sym Hb)). }
-  destruct Hab.
-  constructor.
-Qed.
-
-Lemma bool_of_Nat_beq_logic (a b : Nat) :
-  Logic.eq (bool_of_Bool (Nat_beq a b))
-    (PeanoNat.Nat.eqb (nat_of_Nat a) (nat_of_Nat b)).
-Proof.
-  revert b; induction a as [|a IH]; destruct b; cbn; auto.
-Qed.
-
-Lemma bool_of_Nat_ble_logic (a b : Nat) :
-  Logic.eq (bool_of_Bool (Nat_ble a b))
-    (PeanoNat.Nat.leb (nat_of_Nat a) (nat_of_Nat b)).
-Proof.
-  revert b; induction a as [|a IH]; destruct b; cbn; auto.
-Qed.
-
-Lemma bool_of_Nat_blt_logic (a b : Nat) :
-  Logic.eq (bool_of_Bool (Nat_blt a b))
-    (PeanoNat.Nat.ltb (nat_of_Nat a) (nat_of_Nat b)).
-Proof.
-  unfold Nat_blt.
-  rewrite bool_of_Nat_ble_logic.
-  reflexivity.
-Qed.
-
-Lemma NatCertificate_beq (a b : Nat) (na nb : N) :
-  NatCertificate a na -> NatCertificate b nb ->
-  BoolCertificate (Nat_beq a b) (N.eqb na nb).
-Proof.
-  unfold NatCertificate, BoolCertificate, N_of_Nat.
-  intros Ha Hb.
-  rewrite bool_of_Nat_beq_logic.
-  rewrite PeanoNat.Nat.eqb_compare, N.eqb_compare, Nat2N.inj_compare, Ha, Hb.
-  reflexivity.
-Qed.
-
-Lemma NatCertificate_ble (a b : Nat) (na nb : N) :
-  NatCertificate a na -> NatCertificate b nb ->
-  BoolCertificate (Nat_ble a b) (N.leb na nb).
-Proof.
-  unfold NatCertificate, BoolCertificate, N_of_Nat.
-  intros Ha Hb.
-  rewrite bool_of_Nat_ble_logic.
-  rewrite PeanoNat.Nat.leb_compare, N.leb_compare, Nat2N.inj_compare, Ha, Hb.
-  reflexivity.
-Qed.
-
-Lemma NatCertificate_blt (a b : Nat) (na nb : N) :
-  NatCertificate a na -> NatCertificate b nb ->
-  BoolCertificate (Nat_blt a b) (N.ltb na nb).
-Proof.
-  unfold NatCertificate, BoolCertificate, N_of_Nat.
-  intros Ha Hb.
-  rewrite bool_of_Nat_blt_logic.
-  rewrite PeanoNat.Nat.ltb_compare, N.ltb_compare, Nat2N.inj_compare, Ha, Hb.
-  reflexivity.
-Qed.
-
-Definition Bool_transport_sprop (P : Bool -> SProp)
-    (a b : Bool) (e : eq a b) (x : P a) : P b :=
-  match e in eq _ b return P b with
-  | eq_refl _ => x
-  end.
-
-Definition Nat_transport_sprop (P : Nat -> SProp)
-    (a b : Nat) (e : eq a b) (x : P a) : P b :=
-  match e in eq _ b return P b with
-  | eq_refl _ => x
-  end.
-
-Register NatCertificate as lean.NatCertificate.
-Register NatCertificate_zero as lean.NatCertificate_zero.
-Register NatCertificate_of_N as lean.NatCertificate_of_N.eager.
-Register NatCertificate_CompactNat as lean.NatCertificate_of_N.
-Register NatCertificate_succ as lean.NatCertificate_succ.
-Register NatCertificate_add as lean.NatCertificate_add.
-Register NatCertificate_mul as lean.NatCertificate_mul.
-Register NatCertificate_pow as lean.NatCertificate_pow.
-Register NatCertificate_sub as lean.NatCertificate_sub.
-Register NatCertificate_equal as lean.NatCertificate_equal.
-Register Nat_transport_sprop as lean.Nat_transport_sprop.
-Register Bool_of_bool as lean.Bool_of_bool.
-Register BoolCertificate as lean.BoolCertificate.
-Register BoolCertificate_of_bool as lean.BoolCertificate_of_bool.
-Register BoolCertificate_equal as lean.BoolCertificate_equal.
-Register NatCertificate_beq as lean.NatCertificate_beq.
-Register NatCertificate_ble as lean.NatCertificate_ble.
-Register NatCertificate_blt as lean.NatCertificate_blt.
-Register Bool_transport_sprop as lean.Bool_transport_sprop.
-Register Nat_of_N as lean.Nat_of_N.eager.
+Register CompactNat as lean.Nat_of_N.eager.
 Register CompactNat as lean.Nat_of_N.
+Register CompactNat as kernel.peano_nat_of_N.
 
 #[local] Set Warnings "-abstract-large-number".
-Definition UInt32_size : Nat := 0x100000000%Nat.
+Definition UInt32_size : Nat :=
+  Nat_pow (Nat_succ (Nat_succ Nat_zero))
+    (Nat_succ (Nat_succ (Nat_succ (Nat_succ (Nat_succ (Nat_succ
+      (Nat_succ (Nat_succ (Nat_succ (Nat_succ (Nat_succ (Nat_succ
+      (Nat_succ (Nat_succ (Nat_succ (Nat_succ (Nat_succ (Nat_succ
+      (Nat_succ (Nat_succ (Nat_succ (Nat_succ (Nat_succ (Nat_succ
+      (Nat_succ (Nat_succ (Nat_succ (Nat_succ (Nat_succ (Nat_succ
+      (Nat_succ (Nat_succ Nat_zero)))))))))))))))))))))))))))))))).
 Register UInt32_size as lean.UInt32_size.
 
 Record Fin@{} (n : Nat) := Fin_mk { val : Nat; isLt : (val < n)%Nat }.
@@ -733,9 +387,13 @@ Record UInt32@{} := UInt32_ofBitVec { toBitVec : BitVec 32 }.
 Register UInt32 as lean.UInt32.
 Register toBitVec as lean.toBitVec.
 
+Definition UInt32_toNat (n : UInt32) : Nat :=
+  n.(toBitVec).(toFin _).(val _).
+Register UInt32_toNat as lean.UInt32_toNat.
+
 
 Section strings.
-  Import ZArith NArith Lia Zify ZifyBool.
+  Import BinInt BinNat Nnat Znat Lia Zify ZifyBool.
   Variant InvalidUInt32 (n : N) : Set := invalid_uint32.
   Variant InvalidChar (n : N) : Set := invalid_char.
   #[local] Set Warnings "-abstract-large-number".
@@ -779,7 +437,11 @@ Section strings.
   #[local] Open Scope Nat_scope.
 
   Definition Nat_isValidChar (n : Nat) : SProp
-    := n < 0xd800 \/ (0xdfff < n /\ n < 0x110000).
+    := n < CompactNat 0xd800%N \/
+       (CompactNat 0xdfff%N < n /\ n < CompactNat 0x110000%N).
+
+  Definition UInt32_isValidChar (n : UInt32) : SProp :=
+    Nat_isValidChar n.(toBitVec).(toFin _).(val _).
 
   Record Char@{} := Char_mk
   { val1 : UInt32; valid : Nat_isValidChar val1.(toBitVec).(toFin _).(val _) }.
@@ -815,14 +477,67 @@ Section strings.
     unfold Nat_of_N. rewrite N2Nat.inj_pow.
     eapply Nat_nat_pow. 
   Qed.
-  
-  Lemma Nat_lt_to_N_pow (n : N) (m : N) : (n <? 2 ^ m)%N = true -> Nat_of_N n < Nat_pow 2 (Nat_of_N m).
+
+  Lemma double_Nat_of_nat (n : nat) :
+    double (Nat_of_nat n) = Nat_of_nat (n + n).
   Proof.
-    rewrite <- Nat_pow_comm. eapply Nat_lt_to_N.
+    induction n as [|n IHn].
+    - reflexivity.
+    - cbn [double Nat_of_nat Nat.add].
+      rewrite Nat.add_succ_r, IHn.
+      reflexivity.
   Qed.
 
-  Definition Fin_mk_N_pow (n : N) (val : N) (isLt : (val <? 2 ^ n)%N = true) : Fin (Nat_pow 2 (Nat_of_N n))
-    := Fin_mk (Nat_pow 2 (Nat_of_N n)) (Nat_of_N val) (Nat_lt_to_N_pow val n isLt).
+  Lemma CompactPos_eq_Nat_of_nat (p : positive) :
+    CompactPos p = Nat_of_nat (Pos.to_nat p).
+  Proof.
+    induction p as [p IHp | p IHp |].
+    - rewrite Pos2Nat.inj_xI.
+      replace (2 * Pos.to_nat p)%nat with
+        (Pos.to_nat p + Pos.to_nat p)%nat by lia.
+      cbn [CompactPos Nat_of_nat].
+      now rewrite IHp, double_Nat_of_nat.
+    - rewrite Pos2Nat.inj_xO.
+      replace (2 * Pos.to_nat p)%nat with
+        (Pos.to_nat p + Pos.to_nat p)%nat by lia.
+      cbn [CompactPos].
+      now rewrite IHp, double_Nat_of_nat.
+    - reflexivity.
+  Qed.
+
+  Lemma CompactNat_eq_Nat_of_N (n : N) : CompactNat n = Nat_of_N n.
+  Proof.
+    destruct n as [|p].
+    - reflexivity.
+    - apply CompactPos_eq_Nat_of_nat.
+  Qed.
+
+  Lemma CompactNat_lt_to_N (n m : N) :
+    (n <? m)%N = true -> CompactNat n < CompactNat m.
+  Proof.
+    rewrite !CompactNat_eq_Nat_of_N.
+    apply Nat_lt_to_N.
+  Qed.
+
+  Lemma CompactNat_pow_comm (n : N) :
+    CompactNat (2 ^ n) = Nat_pow 2 (CompactNat n).
+  Proof.
+    rewrite !CompactNat_eq_Nat_of_N.
+    apply Nat_pow_comm.
+  Qed.
+  
+  Lemma Nat_lt_to_N_pow (n : N) (m : N) :
+    (n <? 2 ^ m)%N = true -> Nat_of_N n < Nat_pow 2 (CompactNat m).
+  Proof.
+    rewrite <- CompactNat_pow_comm, CompactNat_eq_Nat_of_N.
+    apply Nat_lt_to_N.
+  Qed.
+
+  Definition Fin_mk_N_pow (n : N) (val : N)
+      (isLt : (val <? 2 ^ n)%N = true) :
+      Fin (Nat_pow 2 (CompactNat n)) :=
+    Fin_mk (Nat_pow 2 (CompactNat n)) (Nat_of_N val)
+      (Nat_lt_to_N_pow val n isLt).
 
   Definition UInt32_mk_N (val : N) (isLt : (val <? 0x100000000)%N = true) : UInt32
     := UInt32_ofBitVec (BitVec_ofFin 32 (Fin_mk_N_pow 32 val isLt)).
@@ -830,7 +545,9 @@ Section strings.
   Lemma Nat_isValidChar_mk_N (n : N) (isLt : check_N_isValidChar n = true)
     : Nat_isValidChar (Nat_of_N n).
   Proof.
-    cbv [Nat_isValidChar Nat_of_num_uint check_N_isValidChar] in *.
+    unfold Nat_isValidChar.
+    rewrite !CompactNat_eq_Nat_of_N.
+    cbv [Nat_of_num_uint check_N_isValidChar] in *.
     pose proof (Nat_lt_to_N n 0xd800) as H1.
     pose proof (Nat_lt_to_N 0xdfff n) as H2.
     pose proof (Nat_lt_to_N n 0x110000) as H3.
@@ -852,7 +569,8 @@ Section strings.
   Qed.
 
   Definition Char_mk_N (val : N) (isLt : ((val <? 0x100000000)%N && check_N_isValidChar val)%bool = true) : Char
-    := Char_mk (UInt32_mk_N val (proj1 (andb_prop _ _ isLt))) (Nat_isValidChar_mk_N val (proj2 (andb_prop _ _ isLt))).
+    := Char_mk (UInt32_mk_N val (proj1 (andb_prop _ _ isLt)))
+         (Nat_isValidChar_mk_N val (proj2 (andb_prop _ _ isLt))).
 
   Definition reflective_Char_mk (val : N)
     : if ((val <? 0x100000000)%N && check_N_isValidChar val)%bool
@@ -864,8 +582,8 @@ Section strings.
        | false => fun _ => invalid_char val
        end Logic.eq_refl.
 
-  Definition reflective_Char_mk_prim (val : Uint63.int)
-    := reflective_Char_mk (Z.to_N (Uint63.to_Z val)).
+  Definition reflective_Char_mk_prim (val : PrimInt63.int)
+    := reflective_Char_mk (Z.to_N (Uint63Axioms.to_Z val)).
 
 
   (* Definition reflective_UInt32_mk (val : N) : if (val <? 0x100000000)%N
@@ -877,8 +595,8 @@ Section strings.
        | false => fun _ => invalid_uint32 val
        end Logic.eq_refl.
 
-  Definition reflective_UInt32_mk_prim (val : Uint63.int)
-    := reflective_UInt32_mk (Z.to_N (Uint63.to_Z val)).
+  Definition reflective_UInt32_mk_prim (val : PrimInt63.int)
+    := reflective_UInt32_mk (Z.to_N (Uint63Axioms.to_Z val)).
 
 
   Definition check_isValidChar (n : Nat) : bool
@@ -916,6 +634,7 @@ Section strings.
 End strings.
 
 Register Nat_isValidChar as lean.Nat_isValidChar.
+Register UInt32_isValidChar as lean.UInt32_isValidChar.
 Register Char as lean.Char.
 Register reflective_Char_mk_prim as lean.Char.mk.reflective_prim.
 
