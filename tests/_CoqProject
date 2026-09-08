@@ -47,3 +47,7 @@ nat_boolean_registration.v
 nat_boolean_controls.v
 nat_boolean_fallback.v
 nullary_unit_scheme.v
+checkpoint_prefix.v
+checkpoint_middle.v
+checkpoint_end.v
+checkpoint_reload.v
