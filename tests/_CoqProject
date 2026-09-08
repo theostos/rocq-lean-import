@@ -34,3 +34,7 @@ primitive_record_reload.v
 strict_import_errors.v
 reducibility_controls.v
 reducibility_controls_reload.v
+checkpoint_prefix.v
+checkpoint_middle.v
+checkpoint_end.v
+checkpoint_reload.v

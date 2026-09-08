@@ -4017,87 +4017,179 @@ let do_input state ~from ~until ch =
 
 let pstate = Summary.ref ~name:"lean-parse-state" LeanParse.empty_state
 
-let lean_obj =
-  let open Summary.Ref in
-  let cache
-      ( pstatev,
-        setsv,
-        declaredv,
-        entriesv,
-        mutual_entriesv,
-        squash_infov,
-        heightv,
-        array_mindsv,
-        prod_mindsv,
-        list_mindsv,
-        option_mindsv,
-        nested_recv,
-        projection_aliasesv,
-        expand_headsv ) =
-    pstate := pstatev;
-    sets := setsv;
-    declared := declaredv;
-    entries := entriesv;
-    constructor_owners := N.Map.fold
-      (fun _ entry owners -> match entry with
-        | Ind ind -> index_constructors ind owners
-        | Def _ | Ax _ | Quot _ -> owners)
-      entriesv N.Map.empty;
-    mutual_entries := mutual_entriesv;
-    squash_info := squash_infov;
-    height_cache := heightv;
-    array_minds := array_mindsv;
-    prod_minds := prod_mindsv;
-    list_minds := list_mindsv;
-    option_minds := option_mindsv;
-    mutual_nested_rec_info := nested_recv;
-    projection_aliases := projection_aliasesv;
-    expand_head_cache := expand_headsv;
-    N.Set.iter
-      (fun name ->
-        match N.Map.find_opt name declaredv with
-        | None -> ()
-        | Some instances ->
-          Int.Map.iter
-            (fun _ instance ->
-              match instance.ref with
-              | GlobRef.ConstRef constant ->
-                Global.set_strategy (Conv_oracle.EvalConstRef constant)
-                  Conv_oracle.Expand
-              | _ -> ())
-            instances)
-      expand_headsv
+(* Entry metadata and parser nodes must share one expression index. *)
+type ('parser, 'entry, 'ind) lean_state_payload = {
+  parser_state : 'parser;
+  source_levels : Level.t Int.Map.t;
+  declared_instances : instantiation Int.Map.t N.Map.t;
+  imported_entries : 'entry N.Map.t;
+  mutual_blocks : 'ind list N.Map.t;
+  squash_metadata : squashy N.Map.t;
+  definition_heights : int N.Map.t;
+  expand_heads : N.Set.t;
+  record_aliases : projection_alias Int.Map.t N.Map.t;
+  array_types : MutInd.t list;
+  prod_types : MutInd.t list;
+  list_types : MutInd.t list;
+  option_types : MutInd.t list;
+  nested_recursors : mutual_nested_rec_info N.Map.t;
+}
+
+type lean_state = (LeanParse.parsing_state, entry, ind) lean_state_payload
+
+type indexed_lean_state =
+  (LeanParse.Checkpoint.t, LeanParse.Checkpoint.saved_entry,
+   LeanParse.Checkpoint.saved_ind) lean_state_payload
+
+let encode_indexed_lean_state (state : lean_state) : indexed_lean_state =
+  let module C = LeanParse.Checkpoint in
+  let parser_state, (imported_entries, mutual_blocks) =
+    C.pack state.parser_state (fun save ->
+      N.Map.map (C.save_entry save) state.imported_entries,
+      N.Map.map (List.map (C.save_ind save)) state.mutual_blocks)
   in
+  { state with parser_state; imported_entries; mutual_blocks }
+
+let decode_indexed_lean_state (state : indexed_lean_state) : lean_state =
+  let module C = LeanParse.Checkpoint in
+  let parser_state, load = C.unpack state.parser_state in
+  let imported_entries = N.Map.map (C.load_entry load) state.imported_entries in
+  let mutual_blocks = N.Map.map (List.map (C.load_ind load)) state.mutual_blocks in
+  { state with parser_state; imported_entries; mutual_blocks }
+
+type packed_lean_state = {
+  state_format : int;
+  state_digest : string;
+  state_blob : string;
+}
+
+let packed_state_format = 1
+let pending_packed_state = Summary.ref ~name:"lean-pending-packed-state" None
+
+let cache_lean_state (state : lean_state) =
+  let open Summary.Ref in
+  pstate := state.parser_state;
+  sets := state.source_levels;
+  declared := state.declared_instances;
+  entries := state.imported_entries;
+  constructor_owners := N.Map.fold
+    (fun _ entry owners -> match entry with
+      | Ind ind -> index_constructors ind owners
+      | Def _ | Ax _ | Quot _ -> owners)
+    state.imported_entries N.Map.empty;
+  mutual_entries := state.mutual_blocks;
+  squash_info := state.squash_metadata;
+  height_cache := state.definition_heights;
+  array_minds := state.array_types;
+  prod_minds := state.prod_types;
+  list_minds := state.list_types;
+  option_minds := state.option_types;
+  mutual_nested_rec_info := state.nested_recursors;
+  projection_aliases := state.record_aliases;
+  expand_head_cache := state.expand_heads;
+  N.Set.iter
+    (fun name ->
+      match N.Map.find_opt name state.declared_instances with
+      | None -> ()
+      | Some instances ->
+        Int.Map.iter
+          (fun _ instance ->
+            match instance.ref with
+            | GlobRef.ConstRef constant ->
+              Global.set_strategy (Conv_oracle.EvalConstRef constant)
+                Conv_oracle.Expand
+            | _ -> ())
+          instances)
+    state.expand_heads;
+  pending_packed_state := None
+
+let packed_lean_obj =
   let open Libobject in
   declare_object
     {
-      (default_object "LEAN-IMPORT-STATE-STOCK-INTEGRATION-V1") with
-      cache_function = cache;
-      load_function = (fun _ v -> cache v);
+      (default_object "LEAN-IMPORT-STATE-INDEXED-V1") with
+      (* Import already installed live state; on reload, defer decoding until needed. *)
+      cache_function = (fun _ -> ());
+      load_function = (fun _ state -> Summary.Ref.(pending_packed_state := Some state));
       classify_function = (fun _ -> Keep);
     }
 
+let pack_lean_state state =
+  (* Do not retain conversion closures or reverse indices during serialization. *)
+  Gc.compact ();
+  let state = encode_indexed_lean_state state in
+  Gc.compact ();
+  (* Avoid retaining Marshal's buffers alongside the final string. *)
+  let temp_dir = Sys.getenv_opt "LEAN_IMPORT_CHECKPOINT_TMP_DIR" in
+  let path, output =
+    Filename.open_temp_file ?temp_dir ~mode:[Open_binary]
+      "lean-import-state-" ".marshal"
+  in
+  let state_blob =
+    Fun.protect
+      ~finally:(fun () ->
+        close_out_noerr output;
+        try Sys.remove path with Sys_error _ -> ())
+      (fun () ->
+        Marshal.to_channel output state [];
+        close_out output;
+        let input = open_in_bin path in
+        Fun.protect ~finally:(fun () -> close_in_noerr input)
+          (fun () -> really_input_string input (in_channel_length input)))
+  in
+  {
+    state_format = packed_state_format;
+    state_digest = Digest.to_hex (Digest.string state_blob);
+    state_blob;
+  }
+
+let force_packed_state () =
+  match Summary.Ref.(!pending_packed_state) with
+  | None -> ()
+  | Some { state_format; state_digest; state_blob } ->
+    if state_format <> packed_state_format then
+      CErrors.user_err
+        Pp.(str "Unsupported packed Lean importer state format "
+            ++ int state_format ++ str ".");
+    let actual_digest = Digest.to_hex (Digest.string state_blob) in
+    if not (String.equal state_digest actual_digest) then
+      CErrors.user_err Pp.(str "Corrupted packed Lean importer state.");
+    let state =
+      try
+        if Marshal.total_size (Bytes.unsafe_of_string state_blob) 0
+           <> String.length state_blob then
+          invalid_arg "trailing checkpoint data";
+        decode_indexed_lean_state
+          (Marshal.from_string state_blob 0 : indexed_lean_state)
+      with Failure _ | Invalid_argument _ ->
+        CErrors.user_err Pp.(str "Invalid packed Lean importer state.")
+    in
+    cache_lean_state state
+
 let import ~from ~until f =
   let open Summary.Ref in
+  force_packed_state ();
   Stdlib.(lcnt := 1);
   (* silence the definition messages from Coq *)
   let { pstate = pstatev } =
     Flags.silently (fun () ->
         do_input { pstate = !pstate; skips = 0 } ~from ~until (open_in f)) ()
   in
-  Lib.add_leaf
-    (lean_obj
-       ( pstatev,
-         !sets,
-         !declared,
-         !entries,
-         !mutual_entries,
-         !squash_info,
-         !height_cache,
-         !array_minds,
-         !prod_minds,
-         !list_minds,
-         !option_minds,
-         !mutual_nested_rec_info,
-         !projection_aliases,
-         !expand_head_cache ))
+  let state = {
+    parser_state = pstatev;
+    source_levels = !sets;
+    declared_instances = !declared;
+    imported_entries = !entries;
+    mutual_blocks = !mutual_entries;
+    squash_metadata = !squash_info;
+    definition_heights = !height_cache;
+    expand_heads = !expand_head_cache;
+    record_aliases = !projection_aliases;
+    array_types = !array_minds;
+    prod_types = !prod_minds;
+    list_types = !list_minds;
+    option_types = !option_minds;
+    nested_recursors = !mutual_nested_rec_info;
+  } in
+  cache_lean_state state;
+  Lib.add_leaf (packed_lean_obj (pack_lean_state state))
