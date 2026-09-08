@@ -32,3 +32,10 @@ nested_below.v
 nested_record_tree_cases.v
 nested_mixed_fields.v
 nullary_unit_scheme.v
+nat_boolean_source.v
+nat_boolean_source_prefix.v
+nat_boolean_source_target.v
+nat_boolean_source_reload.v
+nat_boolean_adjacent.v
+nat_boolean_registration.v
+nat_boolean_controls.v

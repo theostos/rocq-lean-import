@@ -3381,8 +3381,9 @@ and ensure_exists n i =
       | exception Not_found -> CErrors.user_err Pp.(str "missing " ++ N.pp n)))
 
 and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
+  let predeclared = get_predeclared_def_some n i in
   let ref, algs, delay_power_unfolding =
-    match get_predeclared_def_some n i with
+    match predeclared with
     | Some
         ( (( UInt32_size
            | Add
@@ -3390,10 +3391,6 @@ and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
            | Pow
            | Pred
            | Sub
-           | Beq
-           | Ble
-           | Blt
-           | Nat_decEq
            | Nat_isValidChar
            | UInt32_toNat
            | UInt32_isValidChar ) as predeclared),
@@ -3403,7 +3400,12 @@ and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
          TODO make a more general Register-like API? *)
       Feedback.msg_info Pp.(Id.print def_name ++ str " is predeclared");
       (GlobRef.ConstRef c, [], predeclared = Pow)
-    | None ->
+    | None | Some ((Beq | Ble | Blt | Nat_decEq), _, _) ->
+      (* Boolean primitives and their strict-comparison/decision wrappers
+         retain their exported bodies. A direct fixpoint
+         replacement need not be definitionally equal to a source recursor
+         with recursive history, even when both compute the same Boolean.
+         Register the checked body below instead of replacing it. *)
       let uconv = start_uconv univs i in
       let uconv, ty = to_constr empty_env ty uconv in
       let uconv, body = to_constr empty_env body uconv in
@@ -3465,6 +3467,14 @@ and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
       else set_regular (height n body)
   in
   let () = add_declared n i inst in
+  let () =
+    match predeclared, inst.ref with
+    | Some (Beq, _, _), GlobRef.ConstRef c ->
+      Global.register_peano_nat_beq c
+    | Some (Ble, _, _), GlobRef.ConstRef c ->
+      Global.register_peano_nat_ble c
+    | _ -> ()
+  in
   let () =
     if Int.equal i 0 &&
        N.equal n (N.append_list N.anon [ "Nat"; "div"; "go" ])
