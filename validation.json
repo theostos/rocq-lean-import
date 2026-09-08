@@ -1,0 +1,712 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-08",
+  "scope": "Focused importer review validation; not a full cslib check or a kernel soundness result.",
+  "paths_relative_to": "rocq-lean-arena checkout",
+  "stock": {
+    "status": "passed",
+    "submission_branches": 12,
+    "integration_branches": 1,
+    "runtime": {
+      "revision": "56acfe11bcabfc81712ec0191bcbbd7c603e71e5",
+      "source": "_worktrees/review/rocq-upstream-runtime-20260908",
+      "prefix": "_worktrees/review/rocq-upstream-runtime-20260908/_build/install/default",
+      "experimental_kernel_changes": false,
+      "requires": "Development runtime with the Summary.Ref API used by accepted upstream importer PR #71."
+    },
+    "stdlib": {
+      "revision": "3e47b26f345f36e375d81ade399eed0e310984b3",
+      "source": "_worktrees/review/stdlib-upstream-20260908",
+      "theories": "_worktrees/review/stdlib-upstream-20260908/theories"
+    },
+    "harness": {
+      "source": "_worktrees/review/arena-loop-20260908/scripts/validate_importer_review.py",
+      "commit": "f58809c",
+      "documentation": "_worktrees/review/arena-loop-20260908/docs/importer-review-validation.md",
+      "worker_limit": 1,
+      "memory_budget_kib": 3145728,
+      "system_reserve_kib": 6291456,
+      "swap_kib": 0,
+      "compile_timeout_seconds": 180,
+      "build_timeout_seconds": 600,
+      "test_mapping": [
+        "-R",
+        ".",
+        "Test"
+      ],
+      "diagnostic_environment_overrides": "Absent in the initial batch; removed explicitly by the final harness.",
+      "units_and_postchecks": "Run sequentially under the same outer memory guard."
+    },
+    "branches": [
+      {
+        "branch": "submit/universe-instances",
+        "revision": "24693944afcc7d9079eece9b5dd89e615626c158",
+        "status": "passed",
+        "tracked_source_clean": true,
+        "runtime_revision_recorded": null,
+        "runtime_provenance_note": "Initial harness did not record the runtime Git SHA. Its recorded prefix is the isolated stock installation above; later fixtures on descendants use the same installation and record its SHA.",
+        "guard_exit_code": 0,
+        "result": "work/review-importer-20260908/stock-batch-20260908/universe-instances/result.json",
+        "stages": [
+          { "stage": "configure", "exit_code": 0 },
+          { "stage": "build", "exit_code": 0 },
+          { "stage": "test-01-universe_instances", "exit_code": 0 },
+          { "stage": "test-02-ulift", "exit_code": 0 }
+        ]
+      },
+      {
+        "branch": "submit/dependent-projections",
+        "revision": "199a787fb0c01d07c7dae9f013282a47b83dac72",
+        "status": "passed",
+        "tracked_source_clean": true,
+        "runtime_revision_recorded": "56acfe11bcabfc81712ec0191bcbbd7c603e71e5",
+        "guard_exit_code": 0,
+        "result": "work/review-importer-20260908/stock-fixed-20260908/dependent-projections/result.json",
+        "stages": [
+          { "stage": "configure", "exit_code": 0 },
+          { "stage": "build", "exit_code": 0 },
+          { "stage": "test-01-projection_relevance", "exit_code": 0 },
+          { "stage": "test-02-dependent_sprop_projection", "exit_code": 0 },
+          { "stage": "test-03-universe_instances", "exit_code": 0 }
+        ]
+      },
+      {
+        "branch": "submit/mutual-inductives",
+        "revision": "24f7c7ebc0b31e2112d4f52aa08ae3521bbccd9c",
+        "status": "passed",
+        "tracked_source_clean": true,
+        "runtime_revision_recorded": "56acfe11bcabfc81712ec0191bcbbd7c603e71e5",
+        "guard_exit_code": 0,
+        "result": "work/review-importer-20260908/stock-fixed-20260908/mutual-inductives/result.json",
+        "stages": [
+          { "stage": "configure", "exit_code": 0 },
+          { "stage": "build", "exit_code": 0 },
+          { "stage": "test-01-mutual_inductives", "exit_code": 0 },
+          { "stage": "test-02-mutual_instances", "exit_code": 0 },
+          { "stage": "test-03-projection_relevance", "exit_code": 0 },
+          { "stage": "test-04-dependent_sprop_projection", "exit_code": 0 },
+          { "stage": "test-05-universe_instances", "exit_code": 0 }
+        ]
+      },
+      {
+        "branch": "submit/nested-recursors",
+        "revision": "fc37bea050e8b2f158cf9ba98ca61dd131090489",
+        "status": "passed",
+        "tracked_source_clean": true,
+        "runtime_revision_recorded": "56acfe11bcabfc81712ec0191bcbbd7c603e71e5",
+        "guard_exit_code": 0,
+        "result": "work/review-importer-20260908/stock-fixed-20260908/nested-recursors/result.json",
+        "stages": [
+          { "stage": "configure", "exit_code": 0 },
+          { "stage": "build", "exit_code": 0 },
+          { "stage": "test-01-nested_containers", "exit_code": 0 },
+          { "stage": "test-02-nested_partial_application", "exit_code": 0 },
+          { "stage": "test-03-mutual_nested_recursor", "exit_code": 0 },
+          { "stage": "test-04-nested_record_containers", "exit_code": 0 },
+          { "stage": "test-05-nested_record_eligibility", "exit_code": 0 },
+          { "stage": "test-06-sprop_record_scheme", "exit_code": 0 },
+          { "stage": "test-07-nested_below", "exit_code": 0 },
+          { "stage": "test-08-nested_record_tree_cases", "exit_code": 0 },
+          { "stage": "test-09-nested_mixed_fields", "exit_code": 0 },
+          { "stage": "test-10-nested_reload_prefix", "exit_code": 0 },
+          { "stage": "test-11-nested_reload", "exit_code": 0 }
+        ]
+      },
+      {
+        "branch": "submit/primitive-record-eliminators",
+        "revision": "de7f6bc2b981249ea6e472830f0b3126a335e6fd",
+        "status": "passed",
+        "tracked_source_clean": true,
+        "runtime_revision_recorded": "56acfe11bcabfc81712ec0191bcbbd7c603e71e5",
+        "guard_exit_code": 0,
+        "result": "work/review-importer-20260908/stock-fixed-20260908/primitive-record-eliminators/result.json",
+        "stages": [
+          { "stage": "configure", "exit_code": 0 },
+          { "stage": "build", "exit_code": 0 },
+          { "stage": "test-01-primitive_record_eliminator", "exit_code": 0 },
+          { "stage": "test-02-primitive_record_reload_prefix", "exit_code": 0 },
+          { "stage": "test-03-primitive_record_reload", "exit_code": 0 },
+          { "stage": "test-04-dependent_sprop_projection", "exit_code": 0 },
+          { "stage": "test-05-nested_reload_prefix", "exit_code": 0 },
+          { "stage": "test-06-nested_reload", "exit_code": 0 }
+        ]
+      },
+      {
+        "branch": "submit/constructor-owners",
+        "revision": "b8865306d568a450b29a26b107e40d73d42410bb",
+        "status": "passed",
+        "tracked_source_clean": true,
+        "runtime_revision_recorded": "56acfe11bcabfc81712ec0191bcbbd7c603e71e5",
+        "guard_exit_code": 0,
+        "result": "work/review-importer-20260908/stock-fixed-20260908/constructor-owners/result.json",
+        "stages": [
+          { "stage": "configure", "exit_code": 0 },
+          { "stage": "build", "exit_code": 0 },
+          { "stage": "test-01-constructor_owner", "exit_code": 0 },
+          { "stage": "test-02-mutual_inductives", "exit_code": 0 },
+          { "stage": "test-03-mutual_instances", "exit_code": 0 },
+          { "stage": "test-04-projection_relevance", "exit_code": 0 },
+          { "stage": "test-05-dependent_sprop_projection", "exit_code": 0 },
+          { "stage": "test-06-universe_instances", "exit_code": 0 }
+        ]
+      },
+      {
+        "branch": "submit/strict-import-errors",
+        "revision": "38847aaec035b71a7cc0a959b7596013104dbde6",
+        "status": "passed",
+        "tracked_source_clean": true,
+        "runtime_revision_recorded": "56acfe11bcabfc81712ec0191bcbbd7c603e71e5",
+        "guard_exit_code": 0,
+        "result": "work/review-importer-20260908/stock-fixed-20260908/strict-import-errors/result.json",
+        "stages": [
+          { "stage": "configure", "exit_code": 0 },
+          { "stage": "build", "exit_code": 0 },
+          { "stage": "test-01-lowercase_hex", "exit_code": 0 },
+          { "stage": "test-02-ulift", "exit_code": 0 },
+          { "stage": "test-03-strict_import_errors", "exit_code": 0 },
+          { "stage": "check-01-check_strict_import_errors", "exit_code": 0 }
+        ]
+      },
+      {
+        "branch": "submit/reducibility-hints",
+        "revision": "06e957b101ea039687ecc8d90cbd12aa27ec6212",
+        "status": "passed",
+        "tracked_source_clean": true,
+        "runtime_revision_recorded": "56acfe11bcabfc81712ec0191bcbbd7c603e71e5",
+        "guard_exit_code": 0,
+        "result": "work/review-importer-20260908/stock-fixed-20260908/reducibility-hints/result.json",
+        "stages": [
+          { "stage": "configure", "exit_code": 0 },
+          { "stage": "build", "exit_code": 0 },
+          { "stage": "test-01-reducibility_controls", "exit_code": 0 },
+          { "stage": "test-02-reducibility_controls_reload", "exit_code": 0 },
+          { "stage": "test-03-strict_import_errors", "exit_code": 0 },
+          { "stage": "parser-unit-tests", "exit_code": 0 },
+          { "stage": "check-01-check_strict_import_errors", "exit_code": 0 }
+        ]
+      },
+      {
+        "branch": "submit/parser-sharing",
+        "revision": "bafd3d76478e457e98297b9d8d87d7e4a5690f4a",
+        "status": "passed",
+        "tracked_source_clean": true,
+        "runtime_revision_recorded": "56acfe11bcabfc81712ec0191bcbbd7c603e71e5",
+        "guard_exit_code": 0,
+        "result": "work/review-importer-20260908/stock-fixed-20260908/parser-sharing/result.json",
+        "stages": [
+          { "stage": "configure", "exit_code": 0 },
+          { "stage": "build", "exit_code": 0 },
+          { "stage": "test-01-reducibility_controls", "exit_code": 0 },
+          { "stage": "test-02-reducibility_controls_reload", "exit_code": 0 },
+          { "stage": "test-03-strict_import_errors", "exit_code": 0 },
+          { "stage": "parser-unit-tests", "exit_code": 0 },
+          { "stage": "check-01-check_strict_import_errors", "exit_code": 0 }
+        ]
+      },
+      {
+        "branch": "submit/uint32-constructor",
+        "revision": "692555579c46db8aed42f90fc338e0ad4ec09949",
+        "status": "passed",
+        "tracked_source_clean": true,
+        "runtime_revision_recorded": "56acfe11bcabfc81712ec0191bcbbd7c603e71e5",
+        "guard_exit_code": 0,
+        "result": "work/review-importer-20260908/stock-fixed-20260908/uint32-constructor/result.json",
+        "stages": [
+          { "stage": "configure", "exit_code": 0 },
+          { "stage": "build", "exit_code": 0 },
+          { "stage": "test-01-uint32_dispatch", "exit_code": 0 },
+          { "stage": "test-02-core", "exit_code": 0 }
+        ]
+      },
+      {
+        "branch": "submit/string-of-list",
+        "revision": "ea536805c0b480a7848a2ed88f5598fd20e79541",
+        "status": "passed",
+        "tracked_source_clean": true,
+        "runtime_revision_recorded": "56acfe11bcabfc81712ec0191bcbbd7c603e71e5",
+        "guard_exit_code": 0,
+        "result": "work/review-importer-20260908/stock-fixed-20260908/string-of-list/result.json",
+        "stages": [
+          { "stage": "configure", "exit_code": 0 },
+          { "stage": "build", "exit_code": 0 },
+          { "stage": "test-01-string_of_list", "exit_code": 0 },
+          { "stage": "test-02-uint32_dispatch", "exit_code": 0 },
+          { "stage": "test-03-core", "exit_code": 0 }
+        ]
+      },
+      {
+        "branch": "submit/indexed-checkpoints",
+        "revision": "c04270df4a3bdc85c7b1cf4d54bebd1873801663",
+        "status": "passed",
+        "tracked_source_clean": true,
+        "runtime_revision_recorded": "56acfe11bcabfc81712ec0191bcbbd7c603e71e5",
+        "guard_exit_code": 0,
+        "result": "work/review-importer-20260908/stock-checkpoints-c04270d/result.json",
+        "stages": [
+          { "stage": "configure", "exit_code": 0 },
+          { "stage": "build", "exit_code": 0 },
+          { "stage": "test-01-checkpoint_prefix", "exit_code": 0 },
+          { "stage": "test-02-checkpoint_middle", "exit_code": 0 },
+          { "stage": "test-03-checkpoint_end", "exit_code": 0 },
+          { "stage": "test-04-checkpoint_reload", "exit_code": 0 },
+          { "stage": "test-05-nested_reload_prefix", "exit_code": 0 },
+          { "stage": "test-06-nested_reload", "exit_code": 0 },
+          { "stage": "test-07-primitive_record_reload_prefix", "exit_code": 0 },
+          { "stage": "test-08-primitive_record_reload", "exit_code": 0 },
+          { "stage": "test-09-reducibility_controls", "exit_code": 0 },
+          { "stage": "test-10-reducibility_controls_reload", "exit_code": 0 },
+          { "stage": "test-11-strict_import_errors", "exit_code": 0 },
+          { "stage": "parser-unit-tests", "exit_code": 0 },
+          { "stage": "check-01-check_strict_import_errors", "exit_code": 0 }
+        ]
+      },
+      {
+        "branch": "integration/importer-review-stock",
+        "revision": "2dd60b986f359c29dd537b0e5b6fea8b19250b96",
+        "status": "passed",
+        "tracked_source_clean": true,
+        "runtime_revision_recorded": "56acfe11bcabfc81712ec0191bcbbd7c603e71e5",
+        "guard_exit_code": 0,
+        "result": "work/review-importer-20260908/stock-integration-2dd60b9/result.json",
+        "stages": [
+          { "stage": "configure", "exit_code": 0 },
+          { "stage": "build", "exit_code": 0 },
+          { "stage": "test-01-core", "exit_code": 0 },
+          { "stage": "test-02-strict_import_errors", "exit_code": 0 },
+          { "stage": "test-03-reducibility_controls", "exit_code": 0 },
+          { "stage": "test-04-reducibility_controls_reload", "exit_code": 0 },
+          { "stage": "test-05-dependent_sprop_projection", "exit_code": 0 },
+          { "stage": "test-06-sprop_record_scheme", "exit_code": 0 },
+          { "stage": "test-07-nested_containers", "exit_code": 0 },
+          { "stage": "test-08-mutual_nested_recursor", "exit_code": 0 },
+          { "stage": "test-09-nested_below", "exit_code": 0 },
+          { "stage": "test-10-nested_reload_prefix", "exit_code": 0 },
+          { "stage": "test-11-nested_reload", "exit_code": 0 },
+          { "stage": "test-12-primitive_record_eliminator", "exit_code": 0 },
+          { "stage": "test-13-primitive_record_reload_prefix", "exit_code": 0 },
+          { "stage": "test-14-primitive_record_reload", "exit_code": 0 },
+          { "stage": "parser-unit-tests", "exit_code": 0 },
+          { "stage": "check-01-check_strict_import_errors", "exit_code": 0 }
+        ]
+      }
+    ]
+  },
+  "accepted_changes": {
+    "baseline": "c8db0934f0718e44a66c598360ef9c55ff7d6810",
+    "merged_prs": [
+      68,
+      69
+    ],
+    "checked_revisions": "All 15 submission heads plus the stock and experimental integration heads (17 total).",
+    "all_checks_passed": true,
+    "checks": [
+      "The accepted baseline remains an ancestor (git merge-base --is-ancestor).",
+      "tests/lowercase_hex.v and dumps/lowercase_hex, invalid_hex, invalid_hex_width have no diff from the accepted baseline.",
+      "src/leanParse.ml parse_hexa and parse_char blocks are byte-identical to the accepted baseline.",
+      "src/leanName.ml prefix containing toclean and clean_string is byte-identical to the accepted baseline."
+    ],
+    "unchanged_fixture_blobs": {
+      "tests/lowercase_hex.v": "5baadb3ab167e024d6d82e97cead9b17a1dce4df",
+      "dumps/lowercase_hex": "c06f50b75da35636dacb6c3bde915a286b78a683",
+      "dumps/invalid_hex": "81ecd3d24e8d994947885768ca73d3557d39d125",
+      "dumps/invalid_hex_width": "8b335e11e8798d1b73fae9fee00c4c1c3ef600be"
+    }
+  },
+  "findings": [
+    {
+      "id": "proof-only-type-records",
+      "status": "fixed_and_retested",
+      "previous_result": "work/review-importer-20260908/stock-batch-20260908/dependent-projections/result.json",
+      "issue": "Dependent scheme generation failed for proof-only Type records which Rocq marks NoEta.",
+      "resolution": "The importer retains an ordinary inductive for this case; final dependent, mutual, nested, primitive-record and constructor-owner branches pass the affected regressions."
+    },
+    {
+      "id": "strict-error-summary-assembly",
+      "status": "fixed_and_retested",
+      "previous_result": "work/review-importer-20260908/stock-fixed-20260908/indexed-checkpoints/result.json",
+      "issue": "The buffered integration path printed Done before raising an import error. Rocq fixture compilation alone did not catch the misleading success summary.",
+      "resolution": "Integration 2dd60b9 removes the premature finish call. Integration and checkpoint c04270df both pass tests/check_strict_import_errors.sh."
+    },
+    {
+      "id": "stale-core-expected-failures",
+      "status": "corrected_in_integration_fixture",
+      "previous_result": "work/review-importer-20260908/stock-fixed-20260908/stock-integration/result.json",
+      "issue": "The integrated nested adapters accept declarations which inherited core.v still wrapped in Fail. The old comments also named unrelated declarations.",
+      "actual_boundaries": [
+        {
+          "line": 17012,
+          "declaration": "Lean.Syntax.below"
+        },
+        {
+          "line": 17035,
+          "declaration": "Lean.Syntax.below_1"
+        },
+        {
+          "line": 17058,
+          "declaration": "Lean.Syntax.below_2"
+        },
+        {
+          "line": 17267,
+          "declaration": "Lean.Syntax.brecOn_1"
+        }
+      ],
+      "resolution": "Integrated core.v now checks the contiguous prefix before UInt32.ofNatLT and names the actual remaining stock limit. The external PR #72 fixture was not rewritten."
+    },
+    {
+      "id": "optional-source-comparison-registration",
+      "status": "fixed_and_retested",
+      "issue": "A valid legacy source Nat.ble did not satisfy the optional compact-operation validator's open equations and therefore stopped importing.",
+      "resolution": "Keep the checked source definition without optional acceleration. nat_boolean_fallback.v also verifies that explicit invalid registration is still rejected.",
+      "tests": [
+        "tests/nat_boolean_fallback.v"
+      ]
+    },
+    {
+      "id": "translation-cache-dispatch-state",
+      "status": "fixed_and_retested",
+      "issue": "Lazy declaration changed projection/recursor dispatch while an expression was translated, allowing a cached compatibility constant to disagree structurally with a fresh primitive projection.",
+      "resolution": "Invalidate caches and dispatch classification when translation state changes; do not cache results spanning that change. Exact cache validation and disabled-cache tests now pass.",
+      "tests": [
+        "tests/translation_cache_dispatch.v",
+        "tests/nat_boolean_adjacent.v"
+      ],
+      "comparison": "Exact Constr.equal; not relaxed to convertibility."
+    },
+    {
+      "id": "character-fixture-regeneration",
+      "status": "fixed_and_retested",
+      "issue": "The historical char_of_nat dump contained truncated tool output, so it was not a valid regression fixture.",
+      "resolution": "Regenerated from the adjacent unchanged Lean source and passed the compact and unit gates.",
+      "fixture": "dumps/char_of_nat",
+      "lines": 5140,
+      "sha256": "e8ec1b393eca90a09aa6f9de7f463fd818e572cfc6995ec8a22edc3f0bca6d1e",
+      "lean_version": "4.26.0",
+      "lean_revision": "d8204c9",
+      "exporter_revision": "3de59f10",
+      "conversion": "Lean Kernel Arena NDJSON converter."
+    }
+  ],
+  "stock_core_limit": {
+    "status": "expected_timeout_not_full_success",
+    "declaration": "UInt32.ofNatLT",
+    "line": 19152,
+    "diagnostic_declaration_timeout_seconds": 30,
+    "diagnostic_result": "work/review-importer-20260908/core-full-diagnostic-20260908/result.json",
+    "integration_fixture": {
+      "revision": "2dd60b986f359c29dd537b0e5b6fea8b19250b96",
+      "file": "tests/core.v",
+      "successful_range": {
+        "from_inclusive": 1,
+        "to_exclusive": 19152
+      },
+      "expected_timeout_seconds": 1,
+      "expected_failure_range": {
+        "from_inclusive": 19152,
+        "to_exclusive": 19153
+      }
+    },
+    "caveat": "The modern representation branches retain inherited expected failures, including earlier nested declarations; passing their core.v does not validate the complete core dump."
+  },
+  "limitations": [
+    "No full cslib or Mathlib import was run as part of this review gate.",
+    "A deterministic regression expiring specifically during declaration checking remains missing; strict output/rollback tests do not establish timeout-delivery coverage.",
+    "Small synthetic string fixtures test constructor-function selection, not the entire modern Lean String implementation.",
+    "Focused positive and negative tests do not establish soundness of translation or experimental kernel extensions."
+  ],
+  "experimental": {
+    "status": "passed",
+    "submission_branches": 3,
+    "topic_gate_runs": 5,
+    "rocq_test_invocations": 148,
+    "runtime": {
+      "revision": "22cc1ac2301bc2089732b7ab9dde6288d9d2af3e",
+      "source": "_worktrees/review/rocq-experimental-runtime-20260908",
+      "prefix": "_worktrees/review/rocq-experimental-runtime-20260908/_build/install/default",
+      "semantic_kernel_revision": "1ff9ec82b3485fb29a7103f26076087464fd6ca8",
+      "adaptation": "Validation-only backport of upstream b679c63452 for Summary.Ref.",
+      "kernel_files_changed_by_adaptation": false,
+      "stock_runtime": false
+    },
+    "stdlib": {
+      "revision": "3e47b26f345f36e375d81ade399eed0e310984b3",
+      "source": "_worktrees/review/stdlib-experimental-20260908",
+      "theories": "_worktrees/review/stdlib-experimental-20260908/theories"
+    },
+    "runs": [
+      {
+        "topic": "compact-arithmetic",
+        "branch": "submit/compact-arithmetic",
+        "revision": "3e826ab2bb30ef3bcd6a23a88c70e7e65dd1998d",
+        "status": "passed",
+        "tracked_source_clean": true,
+        "runtime_revision_recorded": "22cc1ac2301bc2089732b7ab9dde6288d9d2af3e",
+        "cache_switches": {},
+        "guard_exit_code": 0,
+        "result": "work/review-importer-20260908/experimental-topics-clean-20260908/compact-arithmetic/result.json",
+        "stages": [
+          { "stage": "configure", "exit_code": 0 },
+          { "stage": "build", "exit_code": 0 },
+          { "stage": "test-01-compact_nat", "exit_code": 0 },
+          { "stage": "test-02-nat_boolean_fallback", "exit_code": 0 },
+          { "stage": "test-03-char_of_nat", "exit_code": 0 },
+          { "stage": "test-04-nat_deceq", "exit_code": 0 },
+          { "stage": "test-05-nat_boolean_source", "exit_code": 0 },
+          { "stage": "test-06-nat_boolean_source_prefix", "exit_code": 0 },
+          { "stage": "test-07-nat_boolean_source_target", "exit_code": 0 },
+          { "stage": "test-08-nat_boolean_source_reload", "exit_code": 0 },
+          { "stage": "test-09-nat_boolean_adjacent", "exit_code": 0 },
+          { "stage": "test-10-nat_boolean_registration", "exit_code": 0 },
+          { "stage": "test-11-nat_boolean_controls", "exit_code": 0 },
+          { "stage": "test-12-lowercase_hex", "exit_code": 0 },
+          { "stage": "test-13-uint32_dispatch", "exit_code": 0 },
+          { "stage": "test-14-string_of_list", "exit_code": 0 },
+          { "stage": "test-15-core", "exit_code": 0 }
+        ]
+      },
+      {
+        "topic": "unit-like-eliminators",
+        "branch": "submit/unit-like-eliminators",
+        "revision": "839561a87d4dafad6be0ff811da5f63af894dd9e",
+        "status": "passed",
+        "tracked_source_clean": true,
+        "runtime_revision_recorded": "22cc1ac2301bc2089732b7ab9dde6288d9d2af3e",
+        "cache_switches": {},
+        "guard_exit_code": 0,
+        "result": "work/review-importer-20260908/experimental-integration-clean-20260908/unit-like-eliminators/result.json",
+        "stages": [
+          { "stage": "configure", "exit_code": 0 },
+          { "stage": "build", "exit_code": 0 },
+          { "stage": "test-01-nullary_unit_scheme", "exit_code": 0 },
+          { "stage": "test-02-dependent_sprop_projection", "exit_code": 0 },
+          { "stage": "test-03-projection_relevance", "exit_code": 0 },
+          { "stage": "test-04-compact_nat", "exit_code": 0 },
+          { "stage": "test-05-nat_boolean_fallback", "exit_code": 0 },
+          { "stage": "test-06-char_of_nat", "exit_code": 0 },
+          { "stage": "test-07-nat_deceq", "exit_code": 0 },
+          { "stage": "test-08-nat_boolean_source", "exit_code": 0 },
+          { "stage": "test-09-nat_boolean_source_prefix", "exit_code": 0 },
+          { "stage": "test-10-nat_boolean_source_target", "exit_code": 0 },
+          { "stage": "test-11-nat_boolean_source_reload", "exit_code": 0 },
+          { "stage": "test-12-nat_boolean_adjacent", "exit_code": 0 },
+          { "stage": "test-13-nat_boolean_registration", "exit_code": 0 },
+          { "stage": "test-14-nat_boolean_controls", "exit_code": 0 },
+          { "stage": "test-15-core", "exit_code": 0 }
+        ]
+      },
+      {
+        "topic": "translation-sharing",
+        "branch": "submit/translation-sharing",
+        "revision": "5faa8483b8c6b2d336a2cc059e0b7631e2f1695e",
+        "status": "passed",
+        "tracked_source_clean": true,
+        "runtime_revision_recorded": "22cc1ac2301bc2089732b7ab9dde6288d9d2af3e",
+        "cache_switches": {},
+        "guard_exit_code": 0,
+        "result": "work/review-importer-20260908/experimental-topics-clean-20260908/translation-sharing/result.json",
+        "stages": [
+          { "stage": "configure", "exit_code": 0 },
+          { "stage": "build", "exit_code": 0 },
+          { "stage": "test-01-translation_cache_dispatch", "exit_code": 0 },
+          { "stage": "test-02-dependent_sprop_projection", "exit_code": 0 },
+          { "stage": "test-03-projection_relevance", "exit_code": 0 },
+          { "stage": "test-04-mutual_instances", "exit_code": 0 },
+          { "stage": "test-05-nullary_unit_scheme", "exit_code": 0 },
+          { "stage": "test-06-nested_containers", "exit_code": 0 },
+          { "stage": "test-07-nested_partial_application", "exit_code": 0 },
+          { "stage": "test-08-mutual_nested_recursor", "exit_code": 0 },
+          { "stage": "test-09-nested_record_containers", "exit_code": 0 },
+          { "stage": "test-10-nested_record_eligibility", "exit_code": 0 },
+          { "stage": "test-11-sprop_record_scheme", "exit_code": 0 },
+          { "stage": "test-12-nested_below", "exit_code": 0 },
+          { "stage": "test-13-nested_record_tree_cases", "exit_code": 0 },
+          { "stage": "test-14-nested_mixed_fields", "exit_code": 0 },
+          { "stage": "test-15-nested_reload_prefix", "exit_code": 0 },
+          { "stage": "test-16-nested_reload", "exit_code": 0 },
+          { "stage": "test-17-nat_boolean_source", "exit_code": 0 },
+          { "stage": "test-18-nat_boolean_source_prefix", "exit_code": 0 },
+          { "stage": "test-19-nat_boolean_source_target", "exit_code": 0 },
+          { "stage": "test-20-nat_boolean_source_reload", "exit_code": 0 },
+          { "stage": "test-21-nat_boolean_adjacent", "exit_code": 0 },
+          { "stage": "test-22-nat_boolean_registration", "exit_code": 0 },
+          { "stage": "test-23-nat_boolean_controls", "exit_code": 0 }
+        ]
+      },
+      {
+        "topic": "cache-validation",
+        "branch": "submit/translation-sharing",
+        "revision": "5faa8483b8c6b2d336a2cc059e0b7631e2f1695e",
+        "status": "passed",
+        "tracked_source_clean": true,
+        "runtime_revision_recorded": "22cc1ac2301bc2089732b7ab9dde6288d9d2af3e",
+        "cache_switches": {
+          "LEAN_IMPORT_VALIDATE_TRANSLATION_CACHE": "1"
+        },
+        "guard_exit_code": 0,
+        "result": "work/review-importer-20260908/experimental-topics-clean-20260908/cache-validation/result.json",
+        "stages": [
+          { "stage": "configure", "exit_code": 0 },
+          { "stage": "build", "exit_code": 0 },
+          { "stage": "test-01-translation_cache_dispatch", "exit_code": 0 },
+          { "stage": "test-02-dependent_sprop_projection", "exit_code": 0 },
+          { "stage": "test-03-projection_relevance", "exit_code": 0 },
+          { "stage": "test-04-mutual_instances", "exit_code": 0 },
+          { "stage": "test-05-nullary_unit_scheme", "exit_code": 0 },
+          { "stage": "test-06-nested_containers", "exit_code": 0 },
+          { "stage": "test-07-nested_partial_application", "exit_code": 0 },
+          { "stage": "test-08-mutual_nested_recursor", "exit_code": 0 },
+          { "stage": "test-09-nested_record_containers", "exit_code": 0 },
+          { "stage": "test-10-nested_record_eligibility", "exit_code": 0 },
+          { "stage": "test-11-sprop_record_scheme", "exit_code": 0 },
+          { "stage": "test-12-nested_below", "exit_code": 0 },
+          { "stage": "test-13-nested_record_tree_cases", "exit_code": 0 },
+          { "stage": "test-14-nested_mixed_fields", "exit_code": 0 },
+          { "stage": "test-15-nested_reload_prefix", "exit_code": 0 },
+          { "stage": "test-16-nested_reload", "exit_code": 0 },
+          { "stage": "test-17-nat_boolean_source", "exit_code": 0 },
+          { "stage": "test-18-nat_boolean_source_prefix", "exit_code": 0 },
+          { "stage": "test-19-nat_boolean_source_target", "exit_code": 0 },
+          { "stage": "test-20-nat_boolean_source_reload", "exit_code": 0 },
+          { "stage": "test-21-nat_boolean_adjacent", "exit_code": 0 },
+          { "stage": "test-22-nat_boolean_registration", "exit_code": 0 },
+          { "stage": "test-23-nat_boolean_controls", "exit_code": 0 }
+        ]
+      },
+      {
+        "topic": "cache-disabled",
+        "branch": "submit/translation-sharing",
+        "revision": "5faa8483b8c6b2d336a2cc059e0b7631e2f1695e",
+        "status": "passed",
+        "tracked_source_clean": true,
+        "runtime_revision_recorded": "22cc1ac2301bc2089732b7ab9dde6288d9d2af3e",
+        "cache_switches": {
+          "LEAN_IMPORT_DISABLE_TRANSLATION_CACHE": "1"
+        },
+        "guard_exit_code": 0,
+        "result": "work/review-importer-20260908/experimental-topics-clean-20260908/cache-disabled/result.json",
+        "stages": [
+          { "stage": "configure", "exit_code": 0 },
+          { "stage": "build", "exit_code": 0 },
+          { "stage": "test-01-translation_cache_dispatch", "exit_code": 0 },
+          { "stage": "test-02-dependent_sprop_projection", "exit_code": 0 },
+          { "stage": "test-03-projection_relevance", "exit_code": 0 },
+          { "stage": "test-04-mutual_instances", "exit_code": 0 },
+          { "stage": "test-05-nullary_unit_scheme", "exit_code": 0 },
+          { "stage": "test-06-nested_containers", "exit_code": 0 },
+          { "stage": "test-07-nested_partial_application", "exit_code": 0 },
+          { "stage": "test-08-mutual_nested_recursor", "exit_code": 0 },
+          { "stage": "test-09-nested_record_containers", "exit_code": 0 },
+          { "stage": "test-10-nested_record_eligibility", "exit_code": 0 },
+          { "stage": "test-11-sprop_record_scheme", "exit_code": 0 },
+          { "stage": "test-12-nested_below", "exit_code": 0 },
+          { "stage": "test-13-nested_record_tree_cases", "exit_code": 0 },
+          { "stage": "test-14-nested_mixed_fields", "exit_code": 0 },
+          { "stage": "test-15-nested_reload_prefix", "exit_code": 0 },
+          { "stage": "test-16-nested_reload", "exit_code": 0 },
+          { "stage": "test-17-nat_boolean_source", "exit_code": 0 },
+          { "stage": "test-18-nat_boolean_source_prefix", "exit_code": 0 },
+          { "stage": "test-19-nat_boolean_source_target", "exit_code": 0 },
+          { "stage": "test-20-nat_boolean_source_reload", "exit_code": 0 },
+          { "stage": "test-21-nat_boolean_adjacent", "exit_code": 0 },
+          { "stage": "test-22-nat_boolean_registration", "exit_code": 0 },
+          { "stage": "test-23-nat_boolean_controls", "exit_code": 0 }
+        ]
+      }
+    ],
+    "core": {
+      "lines": 81106,
+      "compact_only": {
+        "revision": "3e826ab2bb30ef3bcd6a23a88c70e7e65dd1998d",
+        "successful_range": {
+          "from_inclusive": 1,
+          "to_exclusive": 79855
+        },
+        "expected_failure": {
+          "line": 79855,
+          "declaration": "Unit.sizeOf",
+          "reason": "Requires the subsequent unit-elimination topic."
+        }
+      },
+      "with_unit_elimination": {
+        "revision": "839561a87d4dafad6be0ff811da5f63af894dd9e",
+        "status": "full_fixture_passed",
+        "test": "tests/core.v",
+        "result": "work/review-importer-20260908/experimental-integration-clean-20260908/unit-like-eliminators/result.json"
+      },
+      "caveat": "This is the importer core fixture, not the cslib or Mathlib export."
+    },
+    "integration": {
+      "branch": "integration/importer-review-experimental",
+      "revision": "68fe7e6589c9266941c99d5e9503e902f9f6e6fc",
+      "status": "passed",
+      "tracked_source_clean": true,
+      "runtime_revision_recorded": "22cc1ac2301bc2089732b7ab9dde6288d9d2af3e",
+      "cache_switches": {},
+      "guard_exit_code": 0,
+      "result": "work/review-importer-20260908/experimental-integration-clean-20260908/experimental-integration/result.json",
+      "stages": [
+        { "stage": "configure", "exit_code": 0 },
+        { "stage": "build", "exit_code": 0 },
+        { "stage": "test-01-init", "exit_code": 0 },
+        { "stage": "test-02-anomaly_print_projections", "exit_code": 0 },
+        { "stage": "test-03-pnni", "exit_code": 0 },
+        { "stage": "test-04-ulift", "exit_code": 0 },
+        { "stage": "test-05-rec_single_ctor", "exit_code": 0 },
+        { "stage": "test-06-lowercase_hex", "exit_code": 0 },
+        { "stage": "test-07-universe_instances", "exit_code": 0 },
+        { "stage": "test-08-projection_relevance", "exit_code": 0 },
+        { "stage": "test-09-dependent_sprop_projection", "exit_code": 0 },
+        { "stage": "test-10-mutual_inductives", "exit_code": 0 },
+        { "stage": "test-11-mutual_instances", "exit_code": 0 },
+        { "stage": "test-12-constructor_owner", "exit_code": 0 },
+        { "stage": "test-13-uint32_dispatch", "exit_code": 0 },
+        { "stage": "test-14-string_of_list", "exit_code": 0 },
+        { "stage": "test-15-nested_containers", "exit_code": 0 },
+        { "stage": "test-16-nested_partial_application", "exit_code": 0 },
+        { "stage": "test-17-mutual_nested_recursor", "exit_code": 0 },
+        { "stage": "test-18-nested_record_containers", "exit_code": 0 },
+        { "stage": "test-19-nested_record_eligibility", "exit_code": 0 },
+        { "stage": "test-20-sprop_record_scheme", "exit_code": 0 },
+        { "stage": "test-21-nested_below", "exit_code": 0 },
+        { "stage": "test-22-nested_record_tree_cases", "exit_code": 0 },
+        { "stage": "test-23-nested_mixed_fields", "exit_code": 0 },
+        { "stage": "test-24-nested_reload_prefix", "exit_code": 0 },
+        { "stage": "test-25-nested_reload", "exit_code": 0 },
+        { "stage": "test-26-primitive_record_eliminator", "exit_code": 0 },
+        { "stage": "test-27-primitive_record_reload_prefix", "exit_code": 0 },
+        { "stage": "test-28-primitive_record_reload", "exit_code": 0 },
+        { "stage": "test-29-strict_import_errors", "exit_code": 0 },
+        { "stage": "test-30-reducibility_controls", "exit_code": 0 },
+        { "stage": "test-31-reducibility_controls_reload", "exit_code": 0 },
+        { "stage": "test-32-compact_nat", "exit_code": 0 },
+        { "stage": "test-33-char_of_nat", "exit_code": 0 },
+        { "stage": "test-34-nat_deceq", "exit_code": 0 },
+        { "stage": "test-35-nat_boolean_source", "exit_code": 0 },
+        { "stage": "test-36-nat_boolean_source_prefix", "exit_code": 0 },
+        { "stage": "test-37-nat_boolean_source_target", "exit_code": 0 },
+        { "stage": "test-38-nat_boolean_source_reload", "exit_code": 0 },
+        { "stage": "test-39-nat_boolean_adjacent", "exit_code": 0 },
+        { "stage": "test-40-translation_cache_dispatch", "exit_code": 0 },
+        { "stage": "test-41-nat_boolean_registration", "exit_code": 0 },
+        { "stage": "test-42-nat_boolean_controls", "exit_code": 0 },
+        { "stage": "test-43-nat_boolean_fallback", "exit_code": 0 },
+        { "stage": "test-44-nullary_unit_scheme", "exit_code": 0 },
+        { "stage": "test-45-checkpoint_prefix", "exit_code": 0 },
+        { "stage": "test-46-checkpoint_middle", "exit_code": 0 },
+        { "stage": "test-47-checkpoint_end", "exit_code": 0 },
+        { "stage": "test-48-checkpoint_reload", "exit_code": 0 },
+        { "stage": "test-49-core", "exit_code": 0 },
+        { "stage": "parser-unit-tests", "exit_code": 0 },
+        { "stage": "check-01-check_strict_import_errors", "exit_code": 0 }
+      ],
+      "core_fixture": "Complete 81106-line dumps/core; no expected failure in tests/core.v."
+    }
+  },
+  "status": "focused_gates_passed",
+  "statistics": {
+    "submission_branches": 15,
+    "integration_branches": 2,
+    "selected_gate_runs": 19,
+    "rocq_test_invocations": 220,
+    "note": "Counts are invocations, including repeated fixtures across branches and cache modes, not distinct theorems or declarations."
+  }
+}

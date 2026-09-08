@@ -1,3 +1,14 @@
+# Importer review stack
+
+See [REVIEWING.md](REVIEWING.md) for topic branches, dependencies and validation
+requirements, and [PR_BODIES.md](PR_BODIES.md) for submission text. Stock-compatible
+topics and experimental-kernel integration are separate families.
+
+The announcement below is historical upstream documentation. Its original Lean
+exports, installation instructions and results do not validate the current stack.
+
+---
+
 Alpha Announcement: Coq is a Lean Typechecker
 
 # Introduction
