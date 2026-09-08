@@ -734,7 +734,7 @@ let get_predeclared_cnames (k : predeclared_ind_kind) n =
   | Or -> [ N.append n "inl"; N.append n "inr" ]
   | And -> [ N.append n "intro" ]
   | Fin -> [ N.append n "mk" ]
-  | UInt32 -> [ N.append n "mk" ]
+  | UInt32 -> [ N.append n "ofBitVec" ]
   | BitVec -> [ N.append n "ofFin" ]
   | Char -> [ N.append n "mk" ]
 
