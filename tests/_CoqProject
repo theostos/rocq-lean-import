@@ -11,3 +11,5 @@ ulift.v
 rec_single_ctor.v
 lowercase_hex.v
 strict_import_errors.v
+reducibility_controls.v
+reducibility_controls_reload.v
