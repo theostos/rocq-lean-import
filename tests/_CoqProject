@@ -14,6 +14,9 @@ projection_relevance.v
 dependent_sprop_projection.v
 mutual_inductives.v
 mutual_instances.v
+constructor_owner.v
+uint32_dispatch.v
+string_of_list.v
 nested_containers.v
 nested_partial_application.v
 mutual_nested_recursor.v
@@ -28,3 +31,6 @@ nested_reload.v
 primitive_record_eliminator.v
 primitive_record_reload_prefix.v
 primitive_record_reload.v
+strict_import_errors.v
+reducibility_controls.v
+reducibility_controls_reload.v

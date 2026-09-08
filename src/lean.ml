@@ -21,8 +21,8 @@ let add_universe l ~lbound g =
   let g = UGraph.add_universe l ~strict:false g in
   UGraph.enforce_constraint (lbound, Le, l) g
 
-let quickdef ~name ~types ~univs body =
-  let entry = Declare.definition_entry ?types ~univs body in
+let quickdef ?(opaque = false) ~name ~types ~univs body =
+  let entry = Declare.definition_entry ~opaque ?types ~univs body in
   let scope = Locality.(Global ImportDefaultBehavior) in
   let kind = Decls.(IsDefinition Definition) in
   let uctx =
@@ -897,8 +897,8 @@ let get_predeclared_def defn n i =
     | exception _ -> None
   else None
 
-type predeclared_ind_kind = Eq | Nat | Nat_le | Or | And | Fin | UInt32 | Char
-type predeclared_def_kind = UInt32_size | Nat_isValidChar
+type predeclared_ind_kind = Eq | Nat | Nat_le | Or | And | Fin | UInt32 | BitVec | Char
+type predeclared_def_kind = UInt32_size | Nat_isValidChar | Nat_pow
 type predeclared_ind_as_def_kind = ULift_cumul
 
 let get_predeclared_cnames (k : predeclared_ind_kind) n =
@@ -909,7 +909,8 @@ let get_predeclared_cnames (k : predeclared_ind_kind) n =
   | Or -> [ N.append n "inl"; N.append n "inr" ]
   | And -> [ N.append n "intro" ]
   | Fin -> [ N.append n "mk" ]
-  | UInt32 -> [ N.append n "mk" ]
+  | UInt32 -> [ N.append n "ofBitVec" ]
+  | BitVec -> [ N.append n "ofFin" ]
   | Char -> [ N.append n "mk" ]
 
 let get_predeclared_ind_any n i =
@@ -924,6 +925,7 @@ let get_predeclared_ind_any n i =
       (And, [ "And" ]);
       (Fin, [ "Fin" ]);
       (UInt32, [ "UInt32" ]);
+      (BitVec, [ "BitVec" ]);
       (Char, [ "Char" ]);
     ]
 
@@ -958,6 +960,7 @@ let get_predeclared_def_any n i =
     [
       (UInt32_size, [ "UInt32"; "size" ]);
       (Nat_isValidChar, [ "Nat"; "isValidChar" ]);
+      (Nat_pow, [ "Nat"; "pow" ]);
     ]
 
 let get_predeclared_def_some n i =
@@ -984,6 +987,15 @@ let declared : instantiation Int.Map.t N.Map.t Summary.Ref.t =
   Summary.ref ~name:"lean-declared-instances" N.Map.empty
 
 let entries : entry N.Map.t Summary.Ref.t = Summary.ref ~name:"lean-entries" N.Map.empty
+
+(* Derived from [entries]; rebuilt on checkpoint load. *)
+let constructor_owners : N.t N.Map.t Summary.Ref.t =
+  Summary.ref ~name:"lean-constructor-owners" N.Map.empty
+
+let index_constructors (ind : ind) owners =
+  List.fold_left
+    (fun owners (name, _) -> N.Map.add name ind.name owners)
+    owners ind.ctors
 
 (* Keep complete blocks for later universe instances. *)
 let mutual_entries : ind list N.Map.t Summary.Ref.t =
@@ -1272,7 +1284,7 @@ let mk_list list uinst ty l =
   in
   mk_list_rec l
 
-let mk_string char string list char_uinst mkChar s =
+let mk_string char list char_uinst mkChar string_of_chars s =
   let codepoints =
     try check_valid_codepoints (string_to_codepoints s)
     with Failure msg as exn ->
@@ -1281,7 +1293,7 @@ let mk_string char string list char_uinst mkChar s =
   in
   let chars = List.map (mk_char mkChar) codepoints in
   let ls = mk_list list char_uinst char chars in
-  Constr.(mkApp (mkConstructU ((string, 1), UVars.Instance.empty), [| ls |]))
+  Constr.mkApp (string_of_chars, [| ls |])
 
 (* [c] has type [indu] applied to [args] *)
 let unfold_proj_case env evd ~field ~indu ~mib ~mip ~args c =
@@ -2723,16 +2735,22 @@ let rec to_constr =
     | String s ->
       (* instantiate (N.append N.anon "Char") [] >>= fun char -> *)
       (* let (_, charu) = Constr.destInd char in *)
-      instantiate (N.append N.anon "String") [] >>= fun string ->
-      let string, _ = Constr.destInd string in
-      instantiate (N.append (N.append N.anon "String") "mk") []
-      >>= fun string_mk ->
+      instantiate (N.append N.anon "String") [] >>= fun _string ->
+      let string_mk = N.append (N.append N.anon "String") "mk" in
+      let string_of_list = N.append (N.append N.anon "String") "ofList" in
+      let string_of_chars =
+        if N.Map.mem string_mk Summary.Ref.(!entries)
+           || not (N.Map.mem string_of_list Summary.Ref.(!entries))
+        then string_mk
+        else string_of_list
+      in
+      instantiate string_of_chars [] >>= fun string_of_chars ->
       get_uconv >>= fun uconv ->
       let list, char =
         with_env_evm env uconv
           (fun env evd () ->
             let ty =
-              Retyping.get_type_of env evd (EConstr.of_constr string_mk)
+              Retyping.get_type_of env evd (EConstr.of_constr string_of_chars)
             in
             let _, list_char, _ = EConstr.destProd evd ty in
             let list, char =
@@ -2764,7 +2782,7 @@ let rec to_constr =
             EConstr.to_constr evd mkChar)
           ()
       in
-      ret (mk_string char string list UVars.Instance.empty mkChar s)
+      ret (mk_string char list UVars.Instance.empty mkChar string_of_chars s)
 
 and instantiate n univs uconv =
   assert (List.length univs < Sys.int_size);
@@ -2796,26 +2814,27 @@ and ensure_exists n i =
   let open Summary.Ref in
   try !declared |> N.Map.find n |> Int.Map.find i
   with Not_found ->
-    (* TODO can we end up asking for a ctor or eliminator before
-       asking for the inductive type? *)
-    (* if i = 0 then CErrors.user_err Pp.(N.pp n ++ str " was not instantiated!"); *)
-    (* assert (not (upfront_instances ())); *)
-    (match N.Map.find_opt n !mutual_entries with
-    | Some inds ->
-      declare_mutual_inductive_instance inds i;
+    (match N.Map.find_opt n !constructor_owners with
+    | Some owner ->
+      ignore (ensure_exists owner i);
       !declared |> N.Map.find n |> Int.Map.find i
     | None ->
-      (match N.Map.find n !entries with
-      | Def def -> declare_def def i
-      | Ax ax -> declare_ax ax i
-      | Ind ind -> declare_ind ind i
-      | Quot _ -> CErrors.user_err Pp.(str "quot must be predeclared")
-      | exception Not_found -> CErrors.user_err Pp.(str "missing " ++ N.pp n)))
+      (match N.Map.find_opt n !mutual_entries with
+      | Some inds ->
+        declare_mutual_inductive_instance inds i;
+        !declared |> N.Map.find n |> Int.Map.find i
+      | None ->
+        (match N.Map.find n !entries with
+        | Def def -> declare_def def i
+        | Ax ax -> declare_ax ax i
+        | Ind ind -> declare_ind ind i
+        | Quot _ -> CErrors.user_err Pp.(str "quot must be predeclared")
+        | exception Not_found -> CErrors.user_err Pp.(str "missing " ++ N.pp n))))
 
-and declare_def { name = n; ty; body; univs; } i =
+and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
   let ref, algs =
     match get_predeclared_def_some n i with
-    | Some ((UInt32_size | Nat_isValidChar), _, (def_name, c)) ->
+    | Some ((UInt32_size | Nat_isValidChar | Nat_pow), _, (def_name, c)) ->
       (* Hack to let the user predeclare some constants
          TODO make a more general Register-like API? *)
       Feedback.msg_info Pp.(Id.print def_name ++ str " is predeclared");
@@ -2826,7 +2845,8 @@ and declare_def { name = n; ty; body; univs; } i =
       let uconv, body = to_constr empty_env body uconv in
       let univs, algs = univ_entry uconv univs in
       let ref =
-        try quickdef ~name:(name_for n i) ~types:(Some ty) ~univs body
+        try quickdef ~opaque:kernel_opaque ~name:(name_for n i)
+          ~types:(Some ty) ~univs body
         with e ->
           let e = Exninfo.capture e in
           Feedback.msg_info
@@ -2843,16 +2863,6 @@ and declare_def { name = n; ty; body; univs; } i =
       in
       (ref, algs)
   in
-  let () =
-    let c = match ref with ConstRef c -> c | _ -> assert false in
-    if expands_at_head body then begin
-      Global.set_strategy (Conv_oracle.EvalConstRef c) Conv_oracle.Expand;
-      Summary.Ref.(expand_head_cache := N.Set.add n !expand_head_cache)
-    end
-    else
-      let height = height n body in
-      Global.set_strategy (Conv_oracle.EvalConstRef c) (Level (-height))
-  in
   let inst =
     match find_projection_alias n i with
     | Some alias ->
@@ -2864,6 +2874,43 @@ and declare_def { name = n; ty; body; univs; } i =
             str "Generated field " ++ N.pp n
             ++ str " is not the expected primitive-record projection")
     | None -> { ref; algs }
+  in
+  let () =
+    let c = match inst.ref with ConstRef c -> c | _ -> assert false in
+    let evaluables =
+      Evaluable.EvalConstRef c ::
+      match Structures.PrimitiveProjections.find_opt c with
+      | None -> []
+      | Some projection -> [ Evaluable.EvalProjectionRef projection ]
+    in
+    let set_strategy level =
+      Redexpr.set_strategy false
+        [ (Level level, evaluables) ]
+    in
+    let set_expand () =
+      Redexpr.set_strategy false
+        [ (Conv_oracle.Expand, evaluables) ]
+    in
+    let set_regular height =
+      Summary.Ref.(height_cache := N.Map.add n height !height_cache);
+      if expands_at_head body then begin
+        set_expand ();
+        Summary.Ref.(expand_head_cache := N.Set.add n !expand_head_cache)
+      end
+      else
+        set_strategy (-height)
+    in
+    if kernel_opaque then ()
+    else match hint with
+    | OpaqueHint -> set_strategy 1
+    | AbbrevHint -> set_expand ()
+    | RegularHint height -> set_regular height
+    | LegacyHint ->
+      if expands_at_head body then begin
+        set_expand ();
+        Summary.Ref.(expand_head_cache := N.Set.add n !expand_head_cache)
+      end
+      else set_regular (height n body)
   in
   let () = add_declared n i inst in
   inst
@@ -2955,7 +3002,7 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
       in
       (mind, [], ind_name, [ cname ], univs, squashy, [])
     | Some
-        ( ((Nat | Nat_le | Or | And | Fin | UInt32 | Char) as k),
+        ( ((Nat | Nat_le | Or | And | Fin | UInt32 | BitVec | Char) as k),
           _,
           (ind_name, mind) ) ->
       (* Hack to let the user predeclare various types before running Lean Import
@@ -3726,13 +3773,17 @@ let add_entry entry =
     | Ax ax -> declare_ax ax
     | Ind ind -> declare_ind ind
   in
-  entries := N.Map.add (entry_name entry) entry !entries
+  entries := N.Map.add (entry_name entry) entry !entries;
+  (match entry with
+  | Ind ind -> constructor_owners := index_constructors ind !constructor_owners
+  | Def _ | Ax _ | Quot _ -> ())
 
 let add_mutual_entries inds =
   let open Summary.Ref in
   List.iter
     (fun ind ->
       entries := N.Map.add ind.name (Ind ind) !entries;
+      constructor_owners := index_constructors ind !constructor_owners;
       mutual_entries := N.Map.add ind.name inds !mutual_entries)
     inds;
   declare_mutual_inductive_group inds
@@ -3758,7 +3809,7 @@ type pending_inductive_group = {
   members_rev : ind list;
 }
 
-let finish state =
+let finish ?(completed = true) state =
   let open Summary.Ref in
   let max_univs, cnt =
     N.Map.fold
@@ -3788,7 +3839,9 @@ let finish state =
   in
   Feedback.msg_info
     Pp.(
-      fnl () ++ fnl () ++ str "Done!" ++ fnl () ++ str "- "
+      fnl () ++ fnl ()
+      ++ str (if completed then "Done!" else "Stopped!")
+      ++ fnl () ++ str "- "
       ++ int (N.Map.cardinal !entries)
       ++ str " entries (" ++ int cnt ++ str " possible instances)"
       ++ (if N.Map.exists (fun _ -> function Quot _ -> true | _ -> false) !entries then
@@ -3825,14 +3878,21 @@ let () =
 
 exception TimedOut
 
-let do_line state l =
-  let do_line () = LeanParse.do_line state ~lcnt:!lcnt l in
+let () =
+  CErrors.register_handler (function
+    | TimedOut -> Some Pp.(str "Lean import line timed out.")
+    | _ -> None)
+
+let with_line_timeout act =
   match !timeout with
-  | None -> do_line ()
+  | None -> act ()
   | Some t ->
-    (match Control.timeout (float_of_int t) do_line () with
+    (match Control.timeout (float_of_int t) act () with
     | Ok v -> v
     | Error info -> Exninfo.iraise (TimedOut, info))
+
+let do_line state l =
+  with_line_timeout (fun () -> LeanParse.do_line state ~lcnt:!lcnt l)
 
 let do_line state l =
   let t0 = System.get_time () in
@@ -3857,7 +3917,7 @@ let unfreeze (lib, sum) =
 
 let process_effect state ch ~line_no ~raw ~name act =
   let st = freeze () in
-  match act () with
+  match with_line_timeout act with
   | () -> Some state
   | exception e ->
     let e = Exninfo.capture e in
@@ -3873,12 +3933,11 @@ let process_effect state ch ~line_no ~raw ~name act =
       Some { state with skips = state.skips + 1 }
     | Stop ->
       close_in ch;
-      finish state;
+      finish ~completed:false state;
       Feedback.msg_info epp;
       None
     | Fail ->
       close_in ch;
-      finish state;
       CErrors.user_err epp
 
 let process_pending state ch = function
@@ -3910,9 +3969,9 @@ let rec do_input_pending state ~from ~until ~pending ch =
       | None -> state
       | Some state ->
         close_in ch;
-        finish state;
         if not (until = None) then
           CErrors.user_err Pp.(str "unexpected EOF!");
+        finish state;
         state)
     | _ when before_from from ->
       incr lcnt;
@@ -3979,6 +4038,11 @@ let lean_obj =
     sets := setsv;
     declared := declaredv;
     entries := entriesv;
+    constructor_owners := N.Map.fold
+      (fun _ entry owners -> match entry with
+        | Ind ind -> index_constructors ind owners
+        | Def _ | Ax _ | Quot _ -> owners)
+      entriesv N.Map.empty;
     mutual_entries := mutual_entriesv;
     squash_info := squash_infov;
     height_cache := heightv;
@@ -4007,7 +4071,7 @@ let lean_obj =
   let open Libobject in
   declare_object
     {
-      (default_object "LEAN-IMPORT-STATE-RECORDS-V1") with
+      (default_object "LEAN-IMPORT-STATE-STOCK-INTEGRATION-V1") with
       cache_function = cache;
       load_function = (fun _ v -> cache v);
       classify_function = (fun _ -> Keep);
