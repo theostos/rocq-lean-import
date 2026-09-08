@@ -904,6 +904,15 @@ let declared : instantiation Int.Map.t N.Map.t Summary.Ref.t =
 
 let entries : entry N.Map.t Summary.Ref.t = Summary.ref ~name:"lean-entries" N.Map.empty
 
+(* Derived from [entries]; rebuilt on checkpoint load. *)
+let constructor_owners : N.t N.Map.t Summary.Ref.t =
+  Summary.ref ~name:"lean-constructor-owners" N.Map.empty
+
+let index_constructors (ind : ind) owners =
+  List.fold_left
+    (fun owners (name, _) -> N.Map.add name ind.name owners)
+    owners ind.ctors
+
 (* Keep complete blocks for later universe instances. *)
 let mutual_entries : ind list N.Map.t Summary.Ref.t =
   Summary.ref ~name:"lean-mutual-entries" N.Map.empty
@@ -1388,21 +1397,22 @@ and ensure_exists n i =
   let open Summary.Ref in
   try !declared |> N.Map.find n |> Int.Map.find i
   with Not_found ->
-    (* TODO can we end up asking for a ctor or eliminator before
-       asking for the inductive type? *)
-    (* if i = 0 then CErrors.user_err Pp.(N.pp n ++ str " was not instantiated!"); *)
-    (* assert (not (upfront_instances ())); *)
-    (match N.Map.find_opt n !mutual_entries with
-    | Some inds ->
-      declare_mutual_inductive_instance inds i;
+    (match N.Map.find_opt n !constructor_owners with
+    | Some owner ->
+      ignore (ensure_exists owner i);
       !declared |> N.Map.find n |> Int.Map.find i
     | None ->
-      (match N.Map.find n !entries with
-      | Def def -> declare_def def i
-      | Ax ax -> declare_ax ax i
-      | Ind ind -> declare_ind ind i
-      | Quot _ -> CErrors.user_err Pp.(str "quot must be predeclared")
-      | exception Not_found -> CErrors.user_err Pp.(str "missing " ++ N.pp n)))
+      (match N.Map.find_opt n !mutual_entries with
+      | Some inds ->
+        declare_mutual_inductive_instance inds i;
+        !declared |> N.Map.find n |> Int.Map.find i
+      | None ->
+        (match N.Map.find n !entries with
+        | Def def -> declare_def def i
+        | Ax ax -> declare_ax ax i
+        | Ind ind -> declare_ind ind i
+        | Quot _ -> CErrors.user_err Pp.(str "quot must be predeclared")
+        | exception Not_found -> CErrors.user_err Pp.(str "missing " ++ N.pp n))))
 
 and declare_def { name = n; ty; body; univs; } i =
   let ref, algs =
@@ -2212,13 +2222,17 @@ let add_entry entry =
     | Ax ax -> declare_ax ax
     | Ind ind -> declare_ind ind
   in
-  entries := N.Map.add (entry_name entry) entry !entries
+  entries := N.Map.add (entry_name entry) entry !entries;
+  (match entry with
+  | Ind ind -> constructor_owners := index_constructors ind !constructor_owners
+  | Def _ | Ax _ | Quot _ -> ())
 
 let add_mutual_entries inds =
   let open Summary.Ref in
   List.iter
     (fun ind ->
       entries := N.Map.add ind.name (Ind ind) !entries;
+      constructor_owners := index_constructors ind !constructor_owners;
       mutual_entries := N.Map.add ind.name inds !mutual_entries)
     inds;
   declare_mutual_inductive_group inds
@@ -2458,6 +2472,11 @@ let lean_obj =
     sets := setsv;
     declared := declaredv;
     entries := entriesv;
+    constructor_owners := N.Map.fold
+      (fun _ entry owners -> match entry with
+        | Ind ind -> index_constructors ind owners
+        | Def _ | Ax _ | Quot _ -> owners)
+      entriesv N.Map.empty;
     mutual_entries := mutual_entriesv;
     squash_info := squash_infov;
     height_cache := heightv;
