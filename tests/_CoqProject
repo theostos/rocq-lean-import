@@ -25,3 +25,6 @@ nested_record_tree_cases.v
 nested_mixed_fields.v
 nested_reload_prefix.v
 nested_reload.v
+primitive_record_eliminator.v
+primitive_record_reload_prefix.v
+primitive_record_reload.v
