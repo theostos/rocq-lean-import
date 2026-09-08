@@ -1,11 +1,17 @@
-# Definition metadata regression
+# Parser-only regressions
 
-Run with `ocamlfind` and the matching Rocq `rocq-runtime.vernac` package:
+Run in a Rocq development environment with `ocamlfind` and `rocq-runtime.vernac`:
 
 ```sh
 bash tests/unit/run.sh
 ```
 
-This parser-only test checks legacy records, abbreviations, regular heights and
-opaque hints versus genuine opacity. It checks body sharing and universe order,
-not kernel opacity, conversion or strategy replay. No Rocq worker is started.
+This compiles only the parser and runs small OCaml fixtures. It does not start
+a Rocq worker, import cslib or test kernel conversion.
+
+The fixtures check:
+
+- Definition metadata: legacy tags, abbreviations, regular heights, and the
+  distinction between an opaque hint and a genuinely opaque declaration.
+- Persistent parser indices, snapshot isolation and legacy-state migration.
+- Indexed checkpoint round trips, expression sharing and malformed data.

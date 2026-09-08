@@ -2010,7 +2010,7 @@ let lean_obj =
   let open Libobject in
   declare_object
     {
-      (default_object "LEAN-IMPORT-STATE-HINTS") with
+      (default_object "LEAN-IMPORT-STATE-CHUNKED") with
       cache_function = cache;
       load_function = (fun _ v -> cache v);
       classify_function = (fun _ -> Keep);

@@ -11,7 +11,7 @@ for module in leanName leanExpr leanParse; do
     "${compiler[@]}" -c "$source_dir/$module.ml" -o "$scratch/$module.cmo"
   fi
 done
-for test in definition_hints; do
+for test in definition_hints chunked_parse checkpoint; do
   "${compiler[@]}" -c "$test_dir/$test.ml" -o "$scratch/$test.cmo"
   "${compiler[@]}" -linkpkg "$scratch/leanName.cmo" "$scratch/leanParse.cmo" \
     "$scratch/$test.cmo" -o "$scratch/$test.exe"
