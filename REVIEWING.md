@@ -1,5 +1,11 @@
 # Importer review guide
 
+For the current compatibility list and branch cleanup, start with
+[CSLIB_PATCHES.md](CSLIB_PATCHES.md). #70 remains open, but the historical
+`Int64.toInt_minValue` error is not evidence that it is required for CSLib.
+The projection branch `submit/dependent-projections` at `953bccc` is based
+directly on upstream. #70 is separate from every other submission branch.
+
 The goal is to check the original proofs of cslib and its dependencies through
 `rocq-lean-import`, without translating library theorems by hand.
 
@@ -16,7 +22,8 @@ own review stack.
 
 Use the topic's stated base, not upstream master, when reviewing a stacked PR.
 [PR_BODIES.md](PR_BODIES.md) contains short titles and descriptions.
-Each source branch also has a `REVIEW.md` with its scope and focused tests.
+Review notes are kept here, outside the implementation branches.
+The amended topic branches and this guide are published together on the fork.
 
 The upstream baseline is `c8db093`: PRs #68 (hex decoding) and #69 (name
 escaping) are already merged and are not resubmitted. Their implementations
@@ -31,8 +38,8 @@ an older Rocq installation is not sufficient.
 
 | Branch | Review base | Change |
 | --- | --- | --- |
-| `submit/universe-instances` | upstream `c8db093` | Complete universe-instance recipes; existing #70 topic. |
-| `submit/dependent-projections` | `submit/universe-instances` | Dependent field types and instantiated relevance. |
+| `submit/universe-instances` | upstream `c8db093` | Separate existing #70 topic; no other topic depends on it. |
+| `submit/dependent-projections` | upstream `c8db093` | Dependent field types and instantiated relevance. |
 | `submit/mutual-inductives` | `submit/dependent-projections` | Instantiate whole mutual blocks. |
 | `submit/constructor-owners` | `submit/mutual-inductives` | Resolve constructor-first references through their owner. |
 | `submit/nested-recursors` | `submit/mutual-inductives` | Coordinated adapters for main and auxiliary nested recursors. |
@@ -49,7 +56,7 @@ cherry-picked onto `c8db093`; it is not a new PR authored here. Our constructor
 correction is a separate, small delta: the exported name is `UInt32.ofBitVec`,
 not `UInt32.mk`. PR #72 alone does not implement `String.ofList`.
 
-`integration/importer-review-stock` (`2dd60b9`) assembles these families for
+`integration/importer-review-stock` (`5e5d19f`) assembles these families, excluding #70, for
 testing; it is not another upstream PR. The checkpoint and experimental
 topics start from this assembly. They require their dependencies to land
 before their complete upstream diff becomes a single-topic change.
@@ -84,6 +91,8 @@ included implementations that have since been replaced.
 
 The current adapter generates structural `fix`/`match` terms. Rocq's existing
 `All`/`AllForall` machinery still supplies schemes and registrations.
+Direct-level tracking belongs to the nested topic: it controls which lower
+bounds are preserved, without pruning the source universe parameters.
 Supported nesting includes List, Array, Option, the recursive second component
 of Prod, eligible records and supported single-inductive auxiliary containers.
 Mutually recursive auxiliary containers remain unsupported.
@@ -97,14 +106,22 @@ branches are not part of this submission stack.
 
 ## Focused validation
 
-The 12 stock-runtime submission heads and stock integration pass their focused
+The previous 12 stock-runtime submission heads and stock integration passed their focused
 gates on upstream Rocq `56acfe11` with Stdlib `3e47b26f`. See
 [VALIDATION.md](VALIDATION.md) and [validation.json](validation.json) for exact
 commits, test stages and results. The three experimental topics also pass their
 focused gates on test runtime `22cc1ac2`, including all three cache modes.
-The unit-elimination topic and experimental integration `68fe7e6` also pass the
+The previous unit-elimination topic and experimental integration `68fe7e6` also passed the
 complete core fixture. The integration gate passes all 49 Rocq fixtures, parser
 units and strict-error log assertions. These tests are not a full-cslib pass.
+
+The subsequent restack removes #70's implementation and dedicated fixture from
+all other topics; all other fixtures and the foundation are unchanged.
+The new heads pass syntax and history/diff checks. Runtime revalidation was
+refused because the full cslib run owns the shared worker. Earlier without-#70
+tests passed core and selected original dependency proofs, but those results
+are not a fresh gate for these heads. See the current status at the top of
+[VALIDATION.md](VALIDATION.md).
 
 Build in a clean checkout using the selected runtime and matching Stdlib:
 
@@ -168,8 +185,9 @@ those topics, not legacy `.vo` files.
 
 ## Submission order and review boundaries
 
-These are local branches; they have not been pushed by this cleanup. Start
-with the independent roots, and update existing #70 rather than duplicating it.
+The amended topic tips are published on the fork.
+Start with `submit/dependent-projections` and the independent roots.
+Keep existing #70 separate; its necessity for CSLib has not been demonstrated.
 For local review, compare only the topic delta:
 
 ```sh

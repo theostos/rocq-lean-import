@@ -1,5 +1,171 @@
 {
   "schema_version": 1,
+  "without_pr70": {
+    "status": "runtime-validation-blocked",
+    "published": true,
+    "base": "c8db0934f0718e44a66c598360ef9c55ff7d6810",
+    "separate_pr70": "4cfef1a1f2d7442195768768070b8e201cbbdb91",
+    "syntax": "passed at all 11 rewritten topic/integration heads",
+    "scope": "Only source adaptations for upstream universe-instance representation and removal of #70-specific fixtures; foundation and all other fixtures unchanged",
+    "lower_bound_policy": "Direct-level tracking belongs to nested-recursors; no parameter pruning or complete-instance recipes",
+    "runtime_attempt": "work/pr70-independent-stack-20260908/stock-gate/result.json",
+    "reason": "User's full cslib import owns shared worker; gate refused launch, no bypass",
+    "prior_comparison": "docs/pr70-cslib-comparison.md in arena: core, Int64, FinLoop, FreeM, DiscrTree and mutual/nested cases passed without #70 before clarity edits; not fresh validation",
+    "recovery": "refs/archive/without-pr70-20260908/<branch>",
+    "heads": [
+      {
+        "branch": "submit/dependent-projections",
+        "previous": "1dcb9ee12c7a54e11d17cf52e3535da3307922cd",
+        "revision": "f39444bcf2662c8161b89daf201bb6de8cded934"
+      },
+      {
+        "branch": "submit/mutual-inductives",
+        "previous": "c7096ecfc2ff84eb245726c3ab8d2793c7cc4fa1",
+        "revision": "c70d7acbe32441b97624b389aeded6e26f3abf53"
+      },
+      {
+        "branch": "submit/constructor-owners",
+        "previous": "1abc083739bbac4ab9671e2c19b5de1c124ab677",
+        "revision": "c5c0d251e70e16fb1d1c28a7d6f66a44dfba2ac7"
+      },
+      {
+        "branch": "submit/nested-recursors",
+        "previous": "e3d8eb0d6bd495dc744696bac3e31850b1c6621b",
+        "revision": "ffebd00ca7d86cb0c0df8120c61e5f7a973e12ce"
+      },
+      {
+        "branch": "submit/primitive-record-eliminators",
+        "previous": "7286df71bd3bc55e270d7b4716c77f9a1bdb1da0",
+        "revision": "4f1d24c9fcdf05dca0948ccd8a120d4ed865823b"
+      },
+      {
+        "branch": "integration/importer-review-stock",
+        "previous": "9b9710087bceb55f502f578551415c7caf29ade2",
+        "revision": "1baf2aa5886fd88c1ec431d8c0d0b32590b18318"
+      },
+      {
+        "branch": "submit/indexed-checkpoints",
+        "previous": "9ac972c1597ce96bfcee56ff75af1eccda526292",
+        "revision": "f323e6ab1e83e4a75788e496d0389372e7c69d73"
+      },
+      {
+        "branch": "submit/compact-arithmetic",
+        "previous": "79e4e9819a2bd8ecfcd452b52aed5422063c925e",
+        "revision": "6db923e762463396d095f8bdcce838ac836b4a79"
+      },
+      {
+        "branch": "submit/unit-like-eliminators",
+        "previous": "114c487202af4112695c87cb9f6c611d4acb419e",
+        "revision": "7d2ef1bcb16ce895472c6890d9065812109bfdac"
+      },
+      {
+        "branch": "submit/translation-sharing",
+        "previous": "a82d13b40dd136b2bfb569690b94158a1f3031a9",
+        "revision": "a8d47d36b9ae8ce666d5e0799bf1fac13d998893"
+      },
+      {
+        "branch": "integration/importer-review-experimental",
+        "previous": "ebdc4bf7747a91bddb18e3ef172918c2ecfd2dce",
+        "revision": "09dc457069ec9d1615944c91d6ec755bf6421d18"
+      }
+    ]
+  },
+  "clarity_pass": {
+    "status": "runtime-validation-blocked",
+    "published": true,
+    "backup_namespace": "refs/archive/submit-clarity-20260908",
+    "syntax": "passed for lean.ml and leanParse.ml at all 17 rewritten heads",
+    "tree_audit": "all17heads preserve tests/dumps/_CoqProject/src/Lean.v exactly; each topic1commit; only enumerated source edits and REVIEW.md removal",
+    "runtime_attempt": "work/review-importer-clarity-20260908/stock/result.json",
+    "reason": "Shared heavyweight worker already owned by another regression; guard not bypassed",
+    "heads": [
+      {
+        "branch": "submit/universe-instances",
+        "previous": "24693944afcc7d9079eece9b5dd89e615626c158",
+        "revision": "4cfef1a1f2d7442195768768070b8e201cbbdb91"
+      },
+      {
+        "branch": "submit/dependent-projections",
+        "previous": "199a787fb0c01d07c7dae9f013282a47b83dac72",
+        "revision": "1dcb9ee12c7a54e11d17cf52e3535da3307922cd"
+      },
+      {
+        "branch": "submit/mutual-inductives",
+        "previous": "24f7c7ebc0b31e2112d4f52aa08ae3521bbccd9c",
+        "revision": "c7096ecfc2ff84eb245726c3ab8d2793c7cc4fa1"
+      },
+      {
+        "branch": "submit/constructor-owners",
+        "previous": "b8865306d568a450b29a26b107e40d73d42410bb",
+        "revision": "1abc083739bbac4ab9671e2c19b5de1c124ab677"
+      },
+      {
+        "branch": "submit/nested-recursors",
+        "previous": "fc37bea050e8b2f158cf9ba98ca61dd131090489",
+        "revision": "e3d8eb0d6bd495dc744696bac3e31850b1c6621b"
+      },
+      {
+        "branch": "submit/primitive-record-eliminators",
+        "previous": "de7f6bc2b981249ea6e472830f0b3126a335e6fd",
+        "revision": "7286df71bd3bc55e270d7b4716c77f9a1bdb1da0"
+      },
+      {
+        "branch": "submit/strict-import-errors",
+        "previous": "38847aaec035b71a7cc0a959b7596013104dbde6",
+        "revision": "a45a5dbb47e203f9c716782e7987a58b505d659b"
+      },
+      {
+        "branch": "submit/reducibility-hints",
+        "previous": "06e957b101ea039687ecc8d90cbd12aa27ec6212",
+        "revision": "30e6bb5b95c4b5c27b36ef589019bba49303865b"
+      },
+      {
+        "branch": "submit/parser-sharing",
+        "previous": "bafd3d76478e457e98297b9d8d87d7e4a5690f4a",
+        "revision": "dc7f180610978935e1ef97ea9765784fef960ae8"
+      },
+      {
+        "branch": "submit/uint32-constructor",
+        "previous": "692555579c46db8aed42f90fc338e0ad4ec09949",
+        "revision": "51f5666b248d1444637b49e1c90677ff21f2212e"
+      },
+      {
+        "branch": "submit/string-of-list",
+        "previous": "ea536805c0b480a7848a2ed88f5598fd20e79541",
+        "revision": "48c82a5261161827b363fa6e59a4d10a3fc2b5a2"
+      },
+      {
+        "branch": "integration/importer-review-stock",
+        "previous": "2dd60b986f359c29dd537b0e5b6fea8b19250b96",
+        "revision": "9b9710087bceb55f502f578551415c7caf29ade2"
+      },
+      {
+        "branch": "submit/indexed-checkpoints",
+        "previous": "c04270df4a3bdc85c7b1cf4d54bebd1873801663",
+        "revision": "9ac972c1597ce96bfcee56ff75af1eccda526292"
+      },
+      {
+        "branch": "submit/compact-arithmetic",
+        "previous": "3e826ab2bb30ef3bcd6a23a88c70e7e65dd1998d",
+        "revision": "79e4e9819a2bd8ecfcd452b52aed5422063c925e"
+      },
+      {
+        "branch": "submit/unit-like-eliminators",
+        "previous": "839561a87d4dafad6be0ff811da5f63af894dd9e",
+        "revision": "114c487202af4112695c87cb9f6c611d4acb419e"
+      },
+      {
+        "branch": "submit/translation-sharing",
+        "previous": "5faa8483b8c6b2d336a2cc059e0b7631e2f1695e",
+        "revision": "a82d13b40dd136b2bfb569690b94158a1f3031a9"
+      },
+      {
+        "branch": "integration/importer-review-experimental",
+        "previous": "68fe7e6589c9266941c99d5e9503e902f9f6e6fc",
+        "revision": "ebdc4bf7747a91bddb18e3ef172918c2ecfd2dce"
+      }
+    ]
+  },
   "date": "2026-09-08",
   "scope": "Focused importer review validation; not a full cslib check or a kernel soundness result.",
   "paths_relative_to": "rocq-lean-arena checkout",
