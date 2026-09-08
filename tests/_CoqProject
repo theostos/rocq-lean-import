@@ -34,3 +34,14 @@ primitive_record_reload.v
 strict_import_errors.v
 reducibility_controls.v
 reducibility_controls_reload.v
+compact_nat.v
+char_of_nat.v
+nat_deceq.v
+nat_boolean_source.v
+nat_boolean_source_prefix.v
+nat_boolean_source_target.v
+nat_boolean_source_reload.v
+nat_boolean_adjacent.v
+nat_boolean_registration.v
+nat_boolean_controls.v
+nat_boolean_fallback.v

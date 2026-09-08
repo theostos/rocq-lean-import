@@ -897,13 +897,41 @@ let get_predeclared_def defn n i =
     | exception _ -> None
   else None
 
-type predeclared_ind_kind = Eq | Nat | Nat_le | Or | And | Fin | UInt32 | BitVec | Char
-type predeclared_def_kind = UInt32_size | Nat_isValidChar | Nat_pow
+type predeclared_ind_kind =
+  | Eq
+  | False
+  | Decidable
+  | Bool
+  | Nat
+  | Nat_le
+  | Or
+  | And
+  | Fin
+  | UInt32
+  | BitVec
+  | Char
+type predeclared_def_kind =
+  | UInt32_size
+  | Add
+  | Mult
+  | Pow
+  | Pred
+  | Sub
+  | Beq
+  | Ble
+  | Blt
+  | Nat_decEq
+  | Nat_isValidChar
+  | UInt32_toNat
+  | UInt32_isValidChar
 type predeclared_ind_as_def_kind = ULift_cumul
 
 let get_predeclared_cnames (k : predeclared_ind_kind) n =
   match k with
   | Eq -> [ N.append n "refl" ]
+  | False -> []
+  | Decidable -> [ N.append n "isFalse"; N.append n "isTrue" ]
+  | Bool -> [ N.append n "false"; N.append n "true" ]
   | Nat -> [ N.append n "zero"; N.append n "succ" ]
   | Nat_le -> [ N.append n "refl"; N.append n "step" ]
   | Or -> [ N.append n "inl"; N.append n "inr" ]
@@ -919,6 +947,9 @@ let get_predeclared_ind_any n i =
       get_predeclared_ind indh n i |> Option.map (fun x -> (indk, indh, x)))
     [
       (Eq, [ "Eq" ]);
+      (False, [ "False" ]);
+      (Decidable, [ "Decidable" ]);
+      (Bool, [ "Bool" ]);
       (Nat, [ "Nat" ]);
       (Nat_le, [ "Nat"; "le" ]);
       (Or, [ "Or" ]);
@@ -959,8 +990,18 @@ let get_predeclared_def_any n i =
       get_predeclared_def defh n i |> Option.map (fun x -> (defk, defh, x)))
     [
       (UInt32_size, [ "UInt32"; "size" ]);
+      (Add, [ "Nat"; "add" ]);
+      (Mult, [ "Nat"; "mul" ]);
+      (Pow, [ "Nat" ; "pow" ]);
+      (Pred, [ "Nat"; "pred" ]);
+      (Sub, [ "Nat"; "sub" ]);
+      (Beq, [ "Nat"; "beq" ]);
+      (Ble, [ "Nat"; "ble" ]);
+      (Blt, [ "Nat"; "blt" ]);
+      (Nat_decEq, [ "Nat"; "decEq" ]);
       (Nat_isValidChar, [ "Nat"; "isValidChar" ]);
-      (Nat_pow, [ "Nat"; "pow" ]);
+      (UInt32_toNat, [ "UInt32"; "toNat" ]);
+      (UInt32_isValidChar, [ "UInt32"; "isValidChar" ]);
     ]
 
 let get_predeclared_def_some n i =
@@ -976,7 +1017,6 @@ let mk_char_prim = "Char.mk.reflective_prim"
 (*
 Register Nat_isValidChar as lean.Nat_isValidChar.
 Register reflective_Char_mk_prim as lean.Char.mk.reflective_prim. *)
-let nat_double = "Nat_double"
 
 (** For each name, the instantiation with all non-sprop univs should always be
     declared, but the instantiations with SProp may be lazily declared. We
@@ -1153,60 +1193,29 @@ let error_mode = function
   | MissingQuot when skip_missing_quot () -> Skip
   | _ -> error_mode ()
 
-module ZMap = CMap.Make (Z)
+let registered_ref key =
+  Constr.mkRef (Rocqlib.lib_ref key, UVars.Instance.empty)
 
-let nat_ints = ref ZMap.empty
-let max_known_int = ref (Z.pred Z.zero)
+let rec positive_int i =
+  assert (Z.lt Z.zero i);
+  if Z.equal i Z.one then registered_ref "num.pos.xH"
+  else
+    let constructor =
+      if Z.equal (Z.rem i (Z.of_int 2)) Z.zero then "num.pos.xO"
+      else "num.pos.xI"
+    in
+    Constr.mkApp
+      (registered_ref constructor, [| positive_int (Z.div i (Z.of_int 2)) |])
 
-let one_more_int nat =
-  let i = Z.succ !max_known_int in
-  let c =
-    if Z.equal i Z.zero then Constr.mkConstructU ((nat, 1), UVars.Instance.empty)
-    else
-      let cpred = ZMap.get !max_known_int !nat_ints in
-      Constr.(
-        mkApp (mkConstructU ((nat, 2), UVars.Instance.empty), [| cpred |]))
-  in
-  nat_ints := ZMap.add i c !nat_ints;
-  max_known_int := i
-
-let max_nat_int = Z.of_string "5000"
-
-let nat_int_binary nat double i =
+let n_int i =
   assert (Z.leq Z.zero i);
-  let rec to_binary z acc =
-    if Z.equal z Z.zero then acc
-    else
-      let bit = if Z.equal (Z.rem z (Z.of_int 2)) Z.zero then 0 else 1 in
-      to_binary (Z.div z (Z.of_int 2)) (bit :: acc)
-  in
-  let binary_representation = to_binary i [] in
-  let xO = Constr.mkConstructU ((nat, 1), UVars.Instance.empty) in
-  let xS = Constr.mkConstructU ((nat, 2), UVars.Instance.empty) in
-  let fS x = Constr.mkApp (xS, [| x |]) in
-  let fDouble x = Constr.mkApp (double, [| x |]) in
-  let rec construct_nat binary_list_rev =
-    match binary_list_rev with
-    | [] -> xO
-    | 0 :: rest ->
-      let rest_constr = construct_nat rest in
-      fDouble rest_constr
-    | 1 :: rest ->
-      let rest_constr = construct_nat rest in
-      fS (fDouble rest_constr)
-    | _ -> assert false
-  in
-  construct_nat (List.rev binary_representation)
+  if Z.equal i Z.zero then registered_ref "num.N.N0"
+  else
+    Constr.mkApp (registered_ref "num.N.Npos", [| positive_int i |])
 
-let nat_int nat double i =
+let nat_int nat_of_n i =
   assert (Z.leq Z.zero i);
-  if Z.leq max_nat_int i then nat_int_binary nat double i
-  else begin
-    while Z.lt !max_known_int i do
-      one_more_int nat
-    done;
-    ZMap.get i !nat_ints
-  end
+  Constr.mkApp (nat_of_n, [| n_int i |])
 
 (* Decode a UTF-8 string into a list of valid codepoints, with error reporting for bad characters *)
 (* let string_to_codepoints s =
@@ -2718,20 +2727,18 @@ let rec to_constr =
       in
       ret c
     | Nat i ->
-      (* [nat_ints] is not synchronized so ensure Nat is instantiated *)
-      instantiate (N.append N.anon "Nat") [] >>= fun nat ->
-      let nat, _ = Constr.destInd nat in
+      instantiate (N.append N.anon "Nat") [] >>= fun _ ->
       get_uconv >>= fun uconv ->
-      let double =
+      let nat_of_n =
         with_env_evm env uconv
           (fun env evd () ->
             let _, p =
-              Evd.fresh_global env evd (Rocqlib.lib_ref ("lean." ^ nat_double))
+              Evd.fresh_global env evd (Rocqlib.lib_ref "lean.Nat_of_N")
             in
             EConstr.to_constr evd p)
           ()
       in
-      ret (nat_int nat double i)
+      ret (nat_int nat_of_n i)
     | String s ->
       (* instantiate (N.append N.anon "Char") [] >>= fun char -> *)
       (* let (_, charu) = Constr.destInd char in *)
@@ -2832,36 +2839,36 @@ and ensure_exists n i =
         | exception Not_found -> CErrors.user_err Pp.(str "missing " ++ N.pp n))))
 
 and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
-  let ref, algs =
-    match get_predeclared_def_some n i with
-    | Some ((UInt32_size | Nat_isValidChar | Nat_pow), _, (def_name, c)) ->
+  let predeclared = get_predeclared_def_some n i in
+  let ref, algs, delay_power_unfolding =
+    match predeclared with
+    | Some
+        ( (( UInt32_size
+           | Add
+           | Mult
+           | Pow
+           | Pred
+           | Sub
+           | Nat_isValidChar
+           | UInt32_toNat
+           | UInt32_isValidChar ) as predeclared),
+          _,
+          (def_name, c) ) ->
       (* Hack to let the user predeclare some constants
          TODO make a more general Register-like API? *)
       Feedback.msg_info Pp.(Id.print def_name ++ str " is predeclared");
-      (GlobRef.ConstRef c, [])
-    | None ->
+      (GlobRef.ConstRef c, [], predeclared = Pow)
+    | None | Some ((Beq | Ble | Blt | Nat_decEq), _, _) ->
+      (* Closed-value agreement does not preserve the source's open reduction rules. *)
       let uconv = start_uconv univs i in
       let uconv, ty = to_constr empty_env ty uconv in
       let uconv, body = to_constr empty_env body uconv in
       let univs, algs = univ_entry uconv univs in
       let ref =
-        try quickdef ~opaque:kernel_opaque ~name:(name_for n i)
+        quickdef ~opaque:kernel_opaque ~name:(name_for n i)
           ~types:(Some ty) ~univs body
-        with e ->
-          let e = Exninfo.capture e in
-          Feedback.msg_info
-            Pp.(
-              str "Failed with" ++ fnl ()
-              ++ Printer.pr_constr_env (Global.env ())
-                   (Evd.from_env (Global.env ()))
-                   body
-              ++ fnl () ++ str ": "
-              ++ Printer.pr_constr_env (Global.env ())
-                   (Evd.from_env (Global.env ()))
-                   ty);
-          Exninfo.iraise e
       in
-      (ref, algs)
+      (ref, algs, false)
   in
   let inst =
     match find_projection_alias n i with
@@ -2898,7 +2905,8 @@ and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
         Summary.Ref.(expand_head_cache := N.Set.add n !expand_head_cache)
       end
       else
-        set_strategy (-height)
+        let level = if delay_power_unfolding then max 1 (-height) else -height in
+        set_strategy level
     in
     if kernel_opaque then ()
     else match hint with
@@ -2913,6 +2921,38 @@ and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
       else set_regular (height n body)
   in
   let () = add_declared n i inst in
+  (* Unsupported compact equations must not reject a checked source definition. *)
+  let try_register register constant =
+    try register constant with
+    | CErrors.UserError reason ->
+      Feedback.msg_info
+        Pp.(str "No compact reduction for " ++ N.pp n ++ str ": " ++ reason)
+  in
+  let () =
+    match predeclared, inst.ref with
+    | Some (Beq, _, _), GlobRef.ConstRef c ->
+      try_register Global.register_peano_nat_beq c
+    | Some (Ble, _, _), GlobRef.ConstRef c ->
+      try_register Global.register_peano_nat_ble c
+    | _ -> ()
+  in
+  let () =
+    if Int.equal i 0 &&
+       N.equal n (N.append_list N.anon [ "Nat"; "div"; "go" ])
+    then match inst.ref with
+    | GlobRef.ConstRef worker ->
+      try_register Global.register_peano_nat_div_go worker
+    | _ -> assert false
+  in
+  let () =
+    if Int.equal i 0 &&
+       N.equal n
+         (N.append_list N.anon [ "Nat"; "modCore"; "go" ])
+    then match inst.ref with
+    | GlobRef.ConstRef worker ->
+      try_register Global.register_peano_nat_mod_go worker
+    | _ -> assert false
+  in
   inst
 
 and declare_ax { name = n; ty; univs } i =
@@ -3002,7 +3042,7 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
       in
       (mind, [], ind_name, [ cname ], univs, squashy, [])
     | Some
-        ( ((Nat | Nat_le | Or | And | Fin | UInt32 | BitVec | Char) as k),
+        ( ((False | Decidable | Bool | Nat | Nat_le | Or | And | Fin | UInt32 | BitVec | Char) as k),
           _,
           (ind_name, mind) ) ->
       (* Hack to let the user predeclare various types before running Lean Import
