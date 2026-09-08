@@ -485,6 +485,62 @@ let to_universe map u =
 let sets : Level.t Int.Map.t Summary.Ref.t =
   Summary.ref ~name:"lean-set-surrogates" Int.Map.empty
 
+(* Fresh identity distinguishes dispatch histories across Summary rollback. *)
+let translation_revision =
+  Summary.ref ~name:"lean-translation-revision" (ref ())
+
+let revise_translation_state () =
+  Summary.Ref.(translation_revision := Stdlib.ref ())
+
+let expression_hash expr = Hashtbl.hash_param 16 128 expr
+
+let translation_hash (expr, depth, context) =
+  Hashtbl.hash_param 16 128 (expression_hash expr, depth, context)
+
+module TranslationCache = Hashtbl.Make (struct
+  type t = LeanExpr.expr * int * int list
+
+  let equal (expr1, depth1, context1) (expr2, depth2, context2) =
+    expr1 == expr2 && Int.equal depth1 depth2
+    && List.equal Int.equal context1 context2
+  let hash = translation_hash
+end)
+
+module ExpressionCache = Hashtbl.Make (struct
+  type t = LeanExpr.expr
+
+  let equal = ( == )
+  let hash = expression_hash
+end)
+
+module ContextCache = Hashtbl.Make (struct
+  type t = Constr.rel_declaration
+
+  let equal declaration1 declaration2 =
+    match declaration1, declaration2 with
+    | RelDecl.LocalAssum (annot1, ty1), RelDecl.LocalAssum (annot2, ty2) ->
+      Sorts.relevance_equal annot1.Context.binder_relevance
+        annot2.Context.binder_relevance
+      && Constr.equal ty1 ty2
+    | RelDecl.LocalDef (annot1, body1, ty1),
+      RelDecl.LocalDef (annot2, body2, ty2) ->
+      Sorts.relevance_equal annot1.Context.binder_relevance
+        annot2.Context.binder_relevance
+      && Constr.equal body1 body2
+      && Constr.equal ty1 ty2
+    | RelDecl.LocalAssum _, RelDecl.LocalDef _
+    | RelDecl.LocalDef _, RelDecl.LocalAssum _ -> false
+
+  let hash declaration =
+    match declaration with
+    | RelDecl.LocalAssum (annot, ty) ->
+      Hashtbl.hash_param 4 16
+        (0, annot.Context.binder_relevance, ty)
+    | RelDecl.LocalDef (annot, body, ty) ->
+      Hashtbl.hash_param 4 16
+        (1, annot.Context.binder_relevance, body, ty)
+end)
+
 type uconv = {
   map : extended_level N.Map.t;  (** Map from lean names to Coq universes *)
   levels : Level.t Universe.Map.t;
@@ -493,6 +549,13 @@ type uconv = {
   direct : Level.Set.t;
       (** Levels whose lower bounds must survive nested-container translation. *)
   graph : UGraph.t;
+  translations : Constr.t TranslationCache.t;
+  context_free_translations : Constr.t ExpressionCache.t;
+  context_free_expressions : bool ExpressionCache.t;
+  loose_bound_ranges : int ExpressionCache.t;
+  contexts : int ContextCache.t;
+  next_context : int ref;
+  cache_revision : unit ref ref;
 }
 
 let lean_id = Id.of_string "Lean"
@@ -778,6 +841,13 @@ let start_uconv univs i =
       map = N.Map.empty;
       levels = Universe.Map.empty;
       direct = Level.Set.empty;
+      translations = TranslationCache.create 251;
+      context_free_translations = ExpressionCache.create 251;
+      context_free_expressions = ExpressionCache.create 251;
+      loose_bound_ranges = ExpressionCache.create 251;
+      contexts = ContextCache.create 251;
+      next_context = ref 0;
+      cache_revision = ref Summary.Ref.(!translation_revision);
     }
   in
   let uconv, set1 = level_of_sets uconv 1 in
@@ -1130,7 +1200,8 @@ let add_projection_alias name instance alias =
       (function
         | None -> Some (Int.Map.singleton instance alias)
         | Some aliases -> Some (Int.Map.add instance alias aliases))
-      !projection_aliases
+      !projection_aliases;
+  revise_translation_state ()
 
 let find_projection_alias name instance =
   let open Summary.Ref in
@@ -1181,7 +1252,8 @@ let add_declared n i inst =
       (function
         | None -> Some (Int.Map.singleton i inst)
         | Some m -> Some (Int.Map.add i inst m))
-      !declared
+      !declared;
+  revise_translation_state ()
 
 let to_univ_level' u uconv =
   match to_universe uconv.map u with
@@ -1453,7 +1525,8 @@ let register_mutual_nested_recursors ~mind ~nparams names =
         N.Map.add base_rec
           { base_recs; mind; nparams; focus = MutualMain index }
           !mutual_nested_rec_info)
-    base_recs
+    base_recs;
+  revise_translation_state ()
 
 let split_auxiliary_recursor_name name =
   match N.unappend name with
@@ -2602,7 +2675,147 @@ let adapt_mutual_nested_recursor env evd info recursors args =
         in
         Some (Constr.mkLambda (annot, target_ty, body)))
 
-let rec to_constr =
+let intern_translation_declaration uconv parent declaration =
+  let substitution = List.map Constr.mkMeta parent in
+  let declaration =
+    RelDecl.map_constr (Vars.substl substitution) declaration
+  in
+  match ContextCache.find_opt uconv.contexts declaration with
+  | Some context -> context
+  | None ->
+    incr uconv.next_context;
+    let context = !(uconv.next_context) in
+    ContextCache.add uconv.contexts declaration context;
+    context
+
+let translation_context uconv env =
+  let rec declarations index collected =
+    match Environ.lookup_rel_ctxt index env with
+    | declaration -> declarations (index + 1) (declaration :: collected)
+    | exception Not_found -> collected
+  in
+  List.fold_left
+    (fun parent declaration ->
+      intern_translation_declaration uconv parent declaration :: parent)
+    [] (declarations 1 [])
+
+let rec loose_bound_range uconv expr =
+  match ExpressionCache.find_opt uconv.loose_bound_ranges expr with
+  | Some range -> range
+  | None ->
+    let range =
+      match expr with
+      | Bound index -> index + 1
+      | Sort _ | Const _ | Nat _ | String _ -> 0
+      | App (function_, argument) ->
+        Stdlib.max (loose_bound_range uconv function_)
+          (loose_bound_range uconv argument)
+      | Let { ty; v; rest; _ } ->
+        Stdlib.max (loose_bound_range uconv ty)
+          (Stdlib.max (loose_bound_range uconv v)
+             (Stdlib.max 0 (loose_bound_range uconv rest - 1)))
+      | Lam (_, _, ty, body) | Pi (_, _, ty, body) ->
+        Stdlib.max (loose_bound_range uconv ty)
+          (Stdlib.max 0 (loose_bound_range uconv body - 1))
+      | Proj (_, _, term) -> loose_bound_range uconv term
+    in
+    ExpressionCache.add uconv.loose_bound_ranges expr range;
+    range
+
+let rec context_free_translation uconv expr =
+  match ExpressionCache.find_opt uconv.context_free_expressions expr with
+  | Some context_free -> context_free
+  | None ->
+    let context_free =
+      match expr with
+      | Bound _ | Sort _ | Const _ | Nat _ | String _ -> true
+      | App (function_, argument) ->
+        let head, _ = decompose_lean_app [] expr in
+        let ordinary_application =
+          match head with
+          | Const (name, _) ->
+            not (N.Map.mem name Summary.Ref.(!projection_aliases))
+            && Option.is_empty (find_mutual_nested_rec_info name)
+          | _ -> true
+        in
+        ordinary_application
+        && context_free_translation uconv function_
+        && context_free_translation uconv argument
+      | Let _ | Lam _ | Pi _ | Proj _ -> false
+    in
+    ExpressionCache.add uconv.context_free_expressions expr context_free;
+    context_free
+
+let rec to_constr env expr uconv =
+  let context = translation_context uconv env in
+  to_constr_in_context env context expr uconv
+
+and to_constr_in_context env context expr uconv =
+  if Option.has_some
+       (Sys.getenv_opt "LEAN_IMPORT_DISABLE_TRANSLATION_CACHE")
+  then to_constr_uncached env context expr uconv
+  else to_constr_cached env context expr uconv
+
+and to_constr_cached env full_context expr uconv =
+  let revision = Summary.Ref.(!translation_revision) in
+  if !(uconv.cache_revision) != revision then begin
+    TranslationCache.clear uconv.translations;
+    ExpressionCache.clear uconv.context_free_translations;
+    ExpressionCache.clear uconv.context_free_expressions;
+    uconv.cache_revision := revision
+  end;
+  let required_context = loose_bound_range uconv expr in
+  let context_free =
+    Int.equal required_context 0
+    || context_free_translation uconv expr
+  in
+  let context_depth = if context_free then 0 else List.length full_context in
+  let context =
+    if context_free then [] else CList.firstn required_context full_context
+  in
+  let cached =
+    if context_free then
+      ExpressionCache.find_opt uconv.context_free_translations expr
+    else
+      TranslationCache.find_opt uconv.translations
+        (expr, context_depth, context)
+  in
+  match cached with
+  | Some term ->
+    if Option.has_some
+         (Sys.getenv_opt "LEAN_IMPORT_VALIDATE_TRANSLATION_CACHE")
+    then
+      let uconv, fresh = to_constr_uncached env full_context expr uconv in
+      if Constr.equal term fresh then (uconv, term)
+      else
+        let kind =
+          match expr with
+          | Bound _ -> "bound" | Sort _ -> "sort" | Const _ -> "constant"
+          | App _ -> "application" | Let _ -> "let" | Lam _ -> "lambda"
+          | Pi _ -> "product" | Proj _ -> "projection" | Nat _ -> "nat"
+          | String _ -> "string"
+        in
+        CErrors.user_err
+          Pp.(str "Translation cache mismatch for " ++ str kind
+              ++ str " with required context " ++ int required_context
+              ++ str ", depth " ++ int context_depth
+              ++ str " and key ["
+              ++ prlist_with_sep (fun () -> str "; ") int context
+              ++ str "]")
+    else (uconv, term)
+  | None ->
+    let uconv, term = to_constr_uncached env full_context expr uconv in
+    (* Lazy declarations may have invalidated this translation. *)
+    if revision == Summary.Ref.(!translation_revision) then begin
+      if context_free then
+        ExpressionCache.add uconv.context_free_translations expr term
+      else
+        TranslationCache.add uconv.translations
+          (expr, context_depth, context) term
+    end;
+    (uconv, term)
+
+and to_constr_uncached =
   let open Constr in
   let ( >>= ) x f uconv =
     let uconv, x = x uconv in
@@ -2611,8 +2824,16 @@ let rec to_constr =
   let get_uconv uconv = (uconv, uconv) in
   let ret x uconv = (uconv, x) in
   let to_annot env n t u = (u, to_annot env n t u) in
-  let push_rel = Environ.push_rel_context_val in
-  fun env -> function
+  let under_binder env context declaration expr uconv =
+    let context =
+      intern_translation_declaration uconv context declaration :: context
+    in
+    let env = Environ.push_rel_context_val declaration env in
+    to_constr_in_context env context expr uconv
+  in
+  fun env context expr ->
+    let translate expr = to_constr_in_context env context expr in
+    match expr with
     | Bound i -> ret (mkRel (i + 1))
     | Sort univ ->
       to_univ_level' univ >>= fun u -> ret (mkSort (sort_of_level u))
@@ -2620,11 +2841,12 @@ let rec to_constr =
     | (App _ as app_expr) -> (
       let head, args = decompose_lean_app [] app_expr in
       let translate_plain () =
-        let a, b =
+        let a, b_expr =
           match app_expr with App (a, b) -> a, b | _ -> assert false
         in
-        to_constr env a >>= fun a ->
-        to_constr env b >>= fun b -> ret (mkApp (a, [| b |]))
+        translate a >>= fun a ->
+        translate b_expr >>= fun b ->
+        ret (mkApp (a, [| b |]))
       in
       match head with
       | Const (n, univs) when N.Map.mem n Summary.Ref.(!projection_aliases) ->
@@ -2632,7 +2854,7 @@ let rec to_constr =
           let alias = find_projection_alias_for_universes uconv n univs in
           let uconv, translated_args =
             CList.fold_left_map
-              (fun uconv arg -> to_constr env arg uconv)
+              (fun uconv arg -> translate arg uconv)
               uconv args
           in
           (match alias with
@@ -2675,7 +2897,7 @@ let rec to_constr =
             in
             let uconv, args =
               CList.fold_left_map
-                (fun uconv arg -> to_constr env arg uconv)
+                (fun uconv arg -> translate arg uconv)
                 uconv args
             in
             let adapted =
@@ -2700,23 +2922,23 @@ let rec to_constr =
               uconv, term)
       | _ -> translate_plain ())
     | Let { name; ty; v; rest } ->
-      to_constr env ty >>= fun ty ->
+      translate ty >>= fun ty ->
       to_annot env name ty >>= fun name ->
-      to_constr env v >>= fun v ->
-      to_constr (push_rel (LocalDef (name, v, ty)) env) rest >>= fun rest ->
+      translate v >>= fun v ->
+      under_binder env context (LocalDef (name, v, ty)) rest >>= fun rest ->
       ret (mkLetIn (name, v, ty, rest))
     | Lam (_bk, n, a, b) ->
-      to_constr env a >>= fun a ->
+      translate a >>= fun a ->
       to_annot env n a >>= fun n ->
-      to_constr (push_rel (LocalAssum (n, a)) env) b >>= fun b ->
+      under_binder env context (LocalAssum (n, a)) b >>= fun b ->
       ret (mkLambda (n, a, b))
     | Pi (_bk, n, a, b) ->
-      to_constr env a >>= fun a ->
+      translate a >>= fun a ->
       to_annot env n a >>= fun n ->
-      to_constr (push_rel (LocalAssum (n, a)) env) b >>= fun b ->
+      under_binder env context (LocalAssum (n, a)) b >>= fun b ->
       ret (mkProd (n, a, b))
     | Proj (lean_ind, field, c) ->
-      to_constr env c >>= fun c ->
+      translate c >>= fun c ->
       get_uconv >>= fun uconv ->
       (* we retype to get the ind, because otherwise we need the lean
        univs for instantiation
@@ -4157,7 +4379,8 @@ let lean_obj =
                   Conv_oracle.Expand
               | _ -> ())
             instances)
-      expand_headsv
+      expand_headsv;
+    revise_translation_state ()
   in
   let open Libobject in
   declare_object

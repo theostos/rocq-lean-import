@@ -42,6 +42,7 @@ nat_boolean_source_prefix.v
 nat_boolean_source_target.v
 nat_boolean_source_reload.v
 nat_boolean_adjacent.v
+translation_cache_dispatch.v
 nat_boolean_registration.v
 nat_boolean_controls.v
 nat_boolean_fallback.v
