@@ -1,0 +1,77 @@
+1 #NS 0 DepRec
+1 #US 0
+0 #ES 1
+2 #NS 1 mk
+3 #NS 0 proposition
+1 #ES 0
+4 #NS 0 proof
+2 #EV 0
+5 #NS 0 next
+3 #EC 1
+4 #EP #BD 5 3 3
+5 #EP #BD 4 2 4
+6 #EP #BD 3 1 5
+6 #NS 1 rec
+7 #NS 0 u
+2 #UP 7
+8 #NS 0 motive
+9 #NS 0 t
+7 #ES 2
+8 #EP #BD 9 3 7
+10 #NS 0 mk
+11 #NS 0 next_ih
+9 #EV 3
+10 #EA 9 2
+11 #EV 4
+12 #EC 2
+13 #EA 12 9
+14 #EV 2
+15 #EA 13 14
+16 #EV 1
+17 #EA 15 16
+18 #EA 11 17
+19 #EP #BD 11 10 18
+20 #EP #BD 5 3 19
+21 #EP #BD 4 2 20
+22 #EP #BD 3 1 21
+23 #EA 14 2
+24 #EP #BD 9 3 23
+25 #EP #BD 10 22 24
+26 #EP #BI 8 8 25
+27 #EA 9 14
+28 #EA 27 16
+29 #EA 28 2
+30 #EC 6 2
+31 #EA 30 11
+32 #EA 31 9
+33 #EA 32 2
+34 #EA 29 33
+35 #EL #BD 5 3 34
+36 #EL #BD 4 2 35
+37 #EL #BD 3 1 36
+38 #EL #BD 10 22 37
+39 #EL #BD 8 8 38
+#IND 0 1 0 1 2 6
+12 #NS 1 proposition
+13 #NS 0 self
+40 #EP #BD 13 3 1
+41 #EJ 1 0 2
+42 #EL #BD 13 3 41
+#DEF 12 40 42
+14 #NS 1 proof
+43 #EC 12
+44 #EA 43 2
+45 #EP #BD 13 3 44
+46 #EJ 1 1 2
+47 #EL #BD 13 3 46
+#DEF 14 45 47
+15 #NS 1 next
+48 #EJ 1 2 2
+49 #EL #BD 13 3 48
+#DEF 15 4 49
+16 #NS 1 getProof
+17 #NS 0 r
+50 #EC 14
+51 #EA 50 2
+52 #EL #BD 17 3 51
+#DEF 16 45 52
