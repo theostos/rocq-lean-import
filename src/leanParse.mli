@@ -1,4 +1,4 @@
-type parsing_state
+type parsing_state = LeanParseShared.indices
 
 type legacy_parsing_state
 (** Parser representation stored before the chunked index (packed format 1). *)

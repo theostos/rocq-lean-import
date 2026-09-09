@@ -18,6 +18,12 @@ let empty_state =
     seen_meta = false;
   }
 
+let of_legacy_state ~seen_meta (state : LeanParse.parsing_state) =
+  { names = state.names; exprs = state.exprs; univs = state.univs; seen_meta }
+
+let to_legacy_state state : LeanParse.parsing_state =
+  { names = state.names; exprs = state.exprs; univs = state.univs }
+
 let is_ndjson_line l =
   let l = String.trim l in
   String.length l > 0 && l.[0] = '{'
@@ -244,7 +250,7 @@ let parse_thm ~lcnt state payload =
   forbid_member ~lcnt "isUnsafe" payload;
   forbid_member ~lcnt "safety" payload;
   validate_mutual_group ~lcnt state payload;
-  parse_deflike_common ~hint:OpaqueHint ~kernel_opaque:true ~lcnt state payload
+  parse_deflike_common ~hint:OpaqueHint ~kernel_opaque:false ~lcnt state payload
 
 let parse_opaque ~lcnt state payload =
   ignore (require_bool ~lcnt "isUnsafe" payload);
@@ -282,14 +288,24 @@ let parse_ind_val ~lcnt state ind_json ctor_jsons =
         LeanParseShared.fix_ctor name nparams ctor_ty)))
   in
   let univs = level_params ~lcnt state ind_json in
-  Entry (Ind { name; params; ty; ctors; univs })
+  { name; params; ty; ctors; univs }
 
 let parse_inductive ~lcnt state payload =
   let types = require_list ~lcnt "types" payload in
   let ctors = require_list ~lcnt "ctors" payload in
-  match types with
-  | [ ind_json ] -> (state, Some (parse_ind_val ~lcnt state ind_json ctors))
-  | _ -> err ~lcnt "mutual inductive groups are not supported by the current importer model"
+  if types = [] then err ~lcnt "empty inductive group";
+  let used = ref 0 in
+  let members = List.map (fun ind ->
+    let name = require_int ~lcnt "name" ind in
+    let constructors = require_list ~lcnt "ctors" ind |> List.map (fun id ->
+      let id = as_int ~lcnt id in
+      match List.find_opt (fun ctor -> require_int ~lcnt "name" ctor = id) ctors with
+      | Some ctor when require_int ~lcnt "induct" ctor = name ->
+        incr used; ctor
+      | _ -> err ~lcnt "constructor does not belong to its inductive") in
+    parse_ind_val ~lcnt state ind constructors) types in
+  if !used <> List.length ctors then err ~lcnt "inductive constructor count mismatch";
+  (state, Some (MutualInd members))
 
 let parse_meta ~lcnt state json =
   let meta = require_member ~lcnt "meta" json in

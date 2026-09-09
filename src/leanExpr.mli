@@ -57,4 +57,4 @@ type notation = {
 
 type entry = Def of def | Ax of ax | Ind of ind | Quot of LeanName.t
 
-type action = Entry of entry | Nota of notation
+type action = Entry of entry | MutualInd of ind list | Nota of notation

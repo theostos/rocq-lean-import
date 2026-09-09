@@ -1,49 +1,7 @@
 open LeanExpr
 module N = LeanName
 
-module RRange : sig
-  type 'a t
-  (** Persistent, append-only index. Published chunks are never mutated. *)
-
-  val empty : 'a t
-  val length : 'a t -> int
-  val append : 'a t -> 'a -> 'a t
-  val get : 'a t -> int -> 'a
-  val singleton : 'a -> 'a t
-end = struct
-  type 'a t = {
-    chunks : 'a array Range.t;
-    tail : 'a Range.t;
-    len : int;
-  }
-
-  let chunk_size = 256
-  let empty = { chunks = Range.empty; tail = Range.empty; len = 0 }
-  let length x = x.len
-
-  let append { chunks; tail; len } x =
-    let tail = Range.cons x tail in
-    let len = len + 1 in
-    if len mod chunk_size <> 0 then { chunks; tail; len }
-    else
-      (* The short tail is newest-first; seal it in index order. Only the
-         directory and the unfinished tail use one tree node per element. *)
-      let chunk =
-        Array.init chunk_size (fun i -> Range.get tail (chunk_size - i - 1))
-      in
-      { chunks = Range.cons chunk chunks; tail = Range.empty; len }
-
-  let get { chunks; tail; len } i =
-    if i < 0 || i >= len then raise Not_found;
-    let full_chunks = len / chunk_size in
-    if i / chunk_size = full_chunks then Range.get tail (len - i - 1)
-    else
-      let chunk = Range.get chunks (full_chunks - i / chunk_size - 1) in
-      chunk.(i mod chunk_size)
-
-  let singleton x = append empty x
-end
-
+open LeanParseShared
 (* These types describe the bytes in checkpoints written before chunking.
    Keep their representation separate from the current parser state. *)
 type 'a legacy_range = { data : 'a Range.t; len : int }
@@ -69,7 +27,7 @@ let do_notation_kind = function
   | "#POSTFIX" -> Postfix
   | k -> assert false
 
-type parsing_state = {
+type parsing_state = LeanParseShared.indices = {
   names : N.t RRange.t;
   exprs : expr RRange.t;
   univs : U.t RRange.t;
@@ -114,40 +72,6 @@ let rec do_ctors state nctors acc l =
       do_ctors state (nctors - 1) ((name, ty) :: acc) rest
     | _ -> CErrors.user_err Pp.(str "Not enough constructors")
 
-(** Replace [n] (meant to be an the inductive type appearing in the constructor
-    type) by (Bound k). *)
-let rec replace_ind ind k = function
-  | Const (n', _) when N.equal ind n' -> Bound k
-  | (Const _ | Bound _ | Sort _) as e -> e
-  | App (a, b) -> App (replace_ind ind k a, replace_ind ind k b)
-  | Let { name; ty; v; rest } ->
-    Let
-      {
-        name;
-        ty = replace_ind ind k ty;
-        v = replace_ind ind k v;
-        rest = replace_ind ind (k + 1) rest;
-      }
-  | Lam (bk, name, a, b) ->
-    Lam (bk, name, replace_ind ind k a, replace_ind ind (k + 1) b)
-  | Pi (bk, name, a, b) ->
-    Pi (bk, name, replace_ind ind k a, replace_ind ind (k + 1) b)
-  | Proj (n, field, c) -> Proj (n, field, replace_ind ind k c)
-  | (Nat _ | String _) as x -> x
-
-let rec pop_params npar ty =
-  if npar = 0 then ([], ty)
-  else
-    match ty with
-    | Pi (bk, name, a, b) ->
-      let pars, ty = pop_params (npar - 1) b in
-      ((bk, name, a) :: pars, ty)
-    | _ -> assert false
-
-let fix_ctor ind nparams ty =
-  let _, ty = pop_params nparams ty in
-  replace_ind ind nparams ty
-
 let as_univ state s = RRange.get state.univs (int_of_string s)
 
 let parse_hexa c =
@@ -168,8 +92,6 @@ let parse_char s =
         str "Expected two hexadecimal digits for a string byte, got "
         ++ int (String.length s));
   Char.chr ((parse_hexa s.[0] * 16) + parse_hexa s.[1])
-
-let quot_name = N.append N.anon "Quot"
 
 let do_line ~lcnt state l =
   let line_msg name =

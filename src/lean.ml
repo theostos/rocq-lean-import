@@ -4706,12 +4706,12 @@ let with_line_timeout act =
     | Ok v -> v
     | Error info -> Exninfo.iraise (TimedOut, info))
 
-let do_line state l =
-  with_line_timeout (fun () -> LeanParse.do_line state ~lcnt:!lcnt l)
+let do_line parse state l =
+  with_line_timeout (fun () -> parse ~lcnt:!lcnt state l)
 
-let do_line state l =
+let do_line parse state l =
   let t0 = System.get_time () in
-  match do_line state l with
+  match do_line parse state l with
   | state ->
     let t1 = System.get_time () in
     prtime t0 t1;
@@ -4774,7 +4774,7 @@ let process_pending state ch = function
         | [ ind ] -> add_entry (Ind ind)
         | _ -> add_mutual_entries inds)
 
-let rec do_input_pending state ~from ~until ~pending ch =
+let rec do_input_pending parse state ~from ~until ~pending ch =
   if until = Some !lcnt then begin
     match process_pending state ch pending with
     | None -> state
@@ -4796,9 +4796,9 @@ let rec do_input_pending state ~from ~until ~pending ch =
         state)
     | _ when before_from from ->
       incr lcnt;
-      do_input_pending state ~from ~until ~pending ch
+      do_input_pending parse state ~from ~until ~pending ch
     | line ->
-      let pstate, oentry = do_line state.pstate line in
+      let pstate, oentry = do_line parse state.pstate line in
       let state = { state with pstate } in
       (match (just_parse (), oentry) with
       | false, Some (Entry (Ind ind)) ->
@@ -4815,7 +4815,7 @@ let rec do_input_pending state ~from ~until ~pending ch =
             Some { pending with members_rev = ind :: pending.members_rev }
         in
         incr lcnt;
-        do_input_pending state ~from ~until ~pending ch
+        do_input_pending parse state ~from ~until ~pending ch
       | _ ->
         match process_pending state ch pending with
         | None -> state
@@ -4826,15 +4826,41 @@ let rec do_input_pending state ~from ~until ~pending ch =
             | false, Some (Entry entry) ->
               process_effect state ch ~line_no:!lcnt ~raw:line
                 ~name:(entry_name entry) (fun () -> add_entry entry)
+            | false, Some (MutualInd inds) ->
+              let first = List.hd inds in
+              process_effect state ch ~line_no:!lcnt ~raw:line
+                ~name:first.name (fun () ->
+                  match inds with
+                  | [ ind ] -> add_entry (Ind ind)
+                  | _ -> add_mutual_entries inds)
           in
           match state_opt with
           | None -> state
           | Some state ->
             incr lcnt;
-            do_input_pending state ~from ~until ~pending:None ch)
+            do_input_pending parse state ~from ~until ~pending:None ch)
 
 let do_input state ~from ~until ch =
-  do_input_pending state ~from ~until ~pending:None ch
+  let start = pos_in ch in
+  let rec detect () =
+    match input_line ch with
+    | line when String.trim line = "" -> detect ()
+    | line -> LeanParseNdjson.is_ndjson_line line
+    | exception End_of_file -> false
+  in
+  let ndjson = detect () in
+  seek_in ch start;
+  let parse =
+    if not ndjson then LeanParse.do_line
+    else
+      let parser = ref
+        (LeanParseNdjson.of_legacy_state ~seen_meta:(before_from from) state.pstate) in
+      fun ~lcnt _ line ->
+        let next, action = LeanParseNdjson.do_line ~lcnt !parser line in
+        parser := next;
+        LeanParseNdjson.to_legacy_state next, action
+  in
+  do_input_pending parse state ~from ~until ~pending:None ch
 
 let pstate = Summary.ref ~name:"lean-parse-state" LeanParse.empty_state
 
