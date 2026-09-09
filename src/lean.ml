@@ -21,8 +21,8 @@ let add_universe l ~lbound g =
   let g = UGraph.add_universe l ~strict:false g in
   UGraph.enforce_constraint (lbound, Le, l) g
 
-let quickdef ~name ~types ~univs body =
-  let entry = Declare.definition_entry ?types ~univs body in
+let quickdef ?(opaque = false) ~name ~types ~univs body =
+  let entry = Declare.definition_entry ~opaque ?types ~univs body in
   let scope = Locality.(Global ImportDefaultBehavior) in
   let kind = Decls.(IsDefinition Definition) in
   let uctx =
@@ -1260,7 +1260,7 @@ and ensure_exists n i =
     | Quot _ -> CErrors.user_err Pp.(str "quot must be predeclared")
     | exception Not_found -> CErrors.user_err Pp.(str "missing " ++ N.pp n))
 
-and declare_def { name = n; ty; body; univs; height = exported_height } i =
+and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
   let ref, algs =
     match get_predeclared_def_some n i with
     | Some ((UInt32_size | Nat_isValidChar), _, (def_name, c)) ->
@@ -1274,7 +1274,7 @@ and declare_def { name = n; ty; body; univs; height = exported_height } i =
       let uconv, body = to_constr empty_env body uconv in
       let univs, algs = univ_entry uconv univs in
       let ref =
-        try quickdef ~name:(name_for n i) ~types:(Some ty) ~univs body
+        try quickdef ~opaque:kernel_opaque ~name:(name_for n i) ~types:(Some ty) ~univs body
         with e ->
           let e = Exninfo.capture e in
           Feedback.msg_info
@@ -1293,12 +1293,17 @@ and declare_def { name = n; ty; body; univs; height = exported_height } i =
   in
   let () =
     let c = match ref with ConstRef c -> c | _ -> assert false in
-    let h =
-      match exported_height with
-      | Some h -> h
-      | None -> height n body
-    in
-    Global.set_strategy (Conv_oracle.EvalConstRef c) (Level (-h))
+    if not kernel_opaque then begin
+      let strategy = match hint with
+        | LegacyHint -> Conv_oracle.Level (-(height n body))
+        | AbbrevHint -> Conv_oracle.Expand
+        | OpaqueHint -> Conv_oracle.Level 1
+        | RegularHint h ->
+          Summary.Ref.(height_cache := N.Map.add n h !height_cache);
+          Conv_oracle.Level (-h)
+      in
+      Redexpr.set_strategy false [ (strategy, [ Evaluable.EvalConstRef c ]) ]
+    end
   in
   let inst = { ref; algs } in
   let () = add_declared n i inst in
