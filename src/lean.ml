@@ -354,13 +354,21 @@ let lean_scheme env ~dep (mind, ind_index) u s =
     Array.mapi
       (fun i (args, _) ->
         let nargs = mip.mind_consnrealargs.(i) in
-        (* skip params *)
-        let args = CList.firstn nargs args in
-        CList.map
-          (fun arg ->
-            let t = RelDecl.get_type arg in
-            has_rec_hyp env mind t)
-          args)
+        (* Constructor declarations are stored innermost first. Each field
+           type lives under the parameters and all earlier fields, not in
+           the global environment. In particular, eta expansion of a nested
+           parameter can reduce dependent matches and inspect these locals. *)
+        let args = Vars.subst_instance_context u args in
+        let args, params = CList.chop nargs args in
+        let env = Environ.push_rel_context params env in
+        let _, recinfo =
+          List.fold_left
+            (fun (env, recinfo) arg ->
+              let recursive = has_rec_hyp env mind (RelDecl.get_type arg) in
+              Environ.push_rel arg env, recursive :: recinfo)
+            (env, []) (List.rev args)
+        in
+        recinfo)
       mip.mind_nf_lc
   in
   let recinfo =
@@ -3730,7 +3738,7 @@ and register_unit_like_if_applicable ind =
     List.for_all
       (function
         | RelDecl.LocalAssum (annot, _) ->
-          not (Sorts.is_relevant annot.Context.binder_relevance)
+          Sorts.relevance_equal annot.Context.binder_relevance Sorts.Irrelevant
         | RelDecl.LocalDef _ -> true)
       fields
   in
