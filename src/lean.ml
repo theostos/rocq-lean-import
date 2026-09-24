@@ -848,19 +848,26 @@ let get_predeclared_def defn n i =
     | exception _ -> None
   else None
 
-type predeclared_ind_kind = Eq | Nat | Nat_le | Or | And | Fin | UInt32 | Char
-type predeclared_def_kind = UInt32_size | Nat_isValidChar
+type predeclared_ind_kind =
+  | Eq | False | Decidable | Bool | Nat | Nat_le | Or | And | Fin | UInt32 | BitVec | Char
+type predeclared_def_kind =
+  | UInt32_size | Add | Mult | Pow | Pred | Sub | Nat_isValidChar | UInt32_toNat
+  | UInt32_isValidChar
 type predeclared_ind_as_def_kind = ULift_cumul
 
 let get_predeclared_cnames (k : predeclared_ind_kind) n =
   match k with
   | Eq -> [ N.append n "refl" ]
+  | False -> []
+  | Decidable -> [ N.append n "isFalse"; N.append n "isTrue" ]
+  | Bool -> [ N.append n "false"; N.append n "true" ]
   | Nat -> [ N.append n "zero"; N.append n "succ" ]
   | Nat_le -> [ N.append n "refl"; N.append n "step" ]
   | Or -> [ N.append n "inl"; N.append n "inr" ]
   | And -> [ N.append n "intro" ]
   | Fin -> [ N.append n "mk" ]
-  | UInt32 -> [ N.append n "mk" ]
+  | UInt32 -> [ N.append n "ofBitVec" ]
+  | BitVec -> [ N.append n "ofFin" ]
   | Char -> [ N.append n "mk" ]
 
 let get_predeclared_ind_any n i =
@@ -869,12 +876,16 @@ let get_predeclared_ind_any n i =
       get_predeclared_ind indh n i |> Option.map (fun x -> (indk, indh, x)))
     [
       (Eq, [ "Eq" ]);
+      (False, [ "False" ]);
+      (Decidable, [ "Decidable" ]);
+      (Bool, [ "Bool" ]);
       (Nat, [ "Nat" ]);
       (Nat_le, [ "Nat"; "le" ]);
       (Or, [ "Or" ]);
       (And, [ "And" ]);
       (Fin, [ "Fin" ]);
       (UInt32, [ "UInt32" ]);
+      (BitVec, [ "BitVec" ]);
       (Char, [ "Char" ]);
     ]
 
@@ -908,7 +919,25 @@ let get_predeclared_def_any n i =
       get_predeclared_def defh n i |> Option.map (fun x -> (defk, defh, x)))
     [
       (UInt32_size, [ "UInt32"; "size" ]);
+      (Add, [ "Nat"; "add" ]);
+      (Mult, [ "Nat"; "mul" ]);
+      (Pow, [ "Nat"; "pow" ]);
+      (Pred, [ "Nat"; "pred" ]);
+      (Sub, [ "Nat"; "sub" ]);
       (Nat_isValidChar, [ "Nat"; "isValidChar" ]);
+      (UInt32_toNat, [ "UInt32"; "toNat" ]);
+      (UInt32_isValidChar, [ "UInt32"; "isValidChar" ]);
+    ]
+
+(* Lean's Nat functions that the kernel evaluates on literals *)
+let peano_nat_workers =
+  List.map
+    (fun (n, register) -> (N.append_list N.anon n, register))
+    [
+      ([ "Nat"; "beq" ], Global.register_peano_nat_beq);
+      ([ "Nat"; "ble" ], Global.register_peano_nat_ble);
+      ([ "Nat"; "div"; "go" ], Global.register_peano_nat_div_go);
+      ([ "Nat"; "modCore"; "go" ], Global.register_peano_nat_mod_go);
     ]
 
 let get_predeclared_def_some n i =
@@ -924,8 +953,6 @@ let mk_char_prim = "Char.mk.reflective_prim"
 (*
 Register Nat_isValidChar as lean.Nat_isValidChar.
 Register reflective_Char_mk_prim as lean.Char.mk.reflective_prim. *)
-let nat_double = "Nat_double"
-
 (** For each name, the instantiation with all non-sprop univs should always be
     declared, but the instantiations with SProp may be lazily declared. We
     expect small instance lengths (experimentally at most 4 in the stdlib) so we
@@ -1046,60 +1073,22 @@ let error_mode = function
   | MissingQuot when skip_missing_quot () -> Skip
   | _ -> error_mode ()
 
-module ZMap = CMap.Make (Z)
+(* A literal [i] becomes [lean.Nat_of_N] applied to [i] in binary *)
+let registered_ref key = Constr.mkRef (Rocqlib.lib_ref key, UVars.Instance.empty)
 
-let nat_ints = ref ZMap.empty
-let max_known_int = ref (Z.pred Z.zero)
+let rec positive_int i =
+  if Z.equal i Z.one then registered_ref "num.pos.xH"
+  else
+    let bit = registered_ref (if Z.is_even i then "num.pos.xO" else "num.pos.xI") in
+    Constr.mkApp (bit, [| positive_int (Z.div i (Z.of_int 2)) |])
 
-let one_more_int nat =
-  let i = Z.succ !max_known_int in
-  let c =
-    if Z.equal i Z.zero then Constr.mkConstructU ((nat, 1), UVars.Instance.empty)
-    else
-      let cpred = ZMap.get !max_known_int !nat_ints in
-      Constr.(
-        mkApp (mkConstructU ((nat, 2), UVars.Instance.empty), [| cpred |]))
-  in
-  nat_ints := ZMap.add i c !nat_ints;
-  max_known_int := i
-
-let max_nat_int = Z.of_string "5000"
-
-let nat_int_binary nat double i =
+let nat_int i =
   assert (Z.leq Z.zero i);
-  let rec to_binary z acc =
-    if Z.equal z Z.zero then acc
-    else
-      let bit = if Z.equal (Z.rem z (Z.of_int 2)) Z.zero then 0 else 1 in
-      to_binary (Z.div z (Z.of_int 2)) (bit :: acc)
+  let n =
+    if Z.equal i Z.zero then registered_ref "num.N.N0"
+    else Constr.mkApp (registered_ref "num.N.Npos", [| positive_int i |])
   in
-  let binary_representation = to_binary i [] in
-  let xO = Constr.mkConstructU ((nat, 1), UVars.Instance.empty) in
-  let xS = Constr.mkConstructU ((nat, 2), UVars.Instance.empty) in
-  let fS x = Constr.mkApp (xS, [| x |]) in
-  let fDouble x = Constr.mkApp (double, [| x |]) in
-  let rec construct_nat binary_list_rev =
-    match binary_list_rev with
-    | [] -> xO
-    | 0 :: rest ->
-      let rest_constr = construct_nat rest in
-      fDouble rest_constr
-    | 1 :: rest ->
-      let rest_constr = construct_nat rest in
-      fS (fDouble rest_constr)
-    | _ -> assert false
-  in
-  construct_nat (List.rev binary_representation)
-
-let nat_int nat double i =
-  assert (Z.leq Z.zero i);
-  if Z.leq max_nat_int i then nat_int_binary nat double i
-  else begin
-    while Z.lt !max_known_int i do
-      one_more_int nat
-    done;
-    ZMap.get i !nat_ints
-  end
+  Constr.mkApp (registered_ref "lean.Nat_of_N", [| n |])
 
 (* Decode a UTF-8 string into a list of valid codepoints, with error reporting for bad characters *)
 (* let string_to_codepoints s =
@@ -1177,7 +1166,7 @@ let mk_list list uinst ty l =
   in
   mk_list_rec l
 
-let mk_string char string list char_uinst mkChar s =
+let mk_string char string_of_chars list char_uinst mkChar s =
   let codepoints =
     try check_valid_codepoints (string_to_codepoints s)
     with Failure msg as exn ->
@@ -1186,7 +1175,7 @@ let mk_string char string list char_uinst mkChar s =
   in
   let chars = List.map (mk_char mkChar) codepoints in
   let ls = mk_list list char_uinst char chars in
-  Constr.(mkApp (mkConstructU ((string, 1), UVars.Instance.empty), [| ls |]))
+  Constr.mkApp (string_of_chars, [| ls |])
 
 (* [c] has type [indu] applied to [args] *)
 let unfold_proj_case env evd ~field ~indu ~mib ~mip ~args c =
@@ -1890,33 +1879,26 @@ let rec to_constr =
       in
       ret c
     | Nat i ->
-      (* [nat_ints] is not synchronized so ensure Nat is instantiated *)
-      instantiate (N.append N.anon "Nat") [] >>= fun nat ->
-      let nat, _ = Constr.destInd nat in
-      get_uconv >>= fun uconv ->
-      let double =
-        with_env_evm env uconv
-          (fun env evd () ->
-            let _, p =
-              Evd.fresh_global env evd (Rocqlib.lib_ref ("lean." ^ nat_double))
-            in
-            EConstr.to_constr evd p)
-          ()
-      in
-      ret (nat_int nat double i)
+      instantiate (N.append N.anon "Nat") [] >>= fun _ -> ret (nat_int i)
     | String s ->
       (* instantiate (N.append N.anon "Char") [] >>= fun char -> *)
       (* let (_, charu) = Constr.destInd char in *)
-      instantiate (N.append N.anon "String") [] >>= fun string ->
-      let string, _ = Constr.destInd string in
-      instantiate (N.append (N.append N.anon "String") "mk") []
-      >>= fun string_mk ->
+      instantiate (N.append N.anon "String") [] >>= fun _ ->
+      (* recent Lean has no String.mk: build strings with String.ofList *)
+      let string_mk = N.append_list N.anon [ "String"; "mk" ] in
+      let string_of_list = N.append_list N.anon [ "String"; "ofList" ] in
+      let string_of_chars =
+        if N.Map.mem string_mk !entries || not (N.Map.mem string_of_list !entries)
+        then string_mk
+        else string_of_list
+      in
+      instantiate string_of_chars [] >>= fun string_of_chars ->
       get_uconv >>= fun uconv ->
       let list, char =
         with_env_evm env uconv
           (fun env evd () ->
             let ty =
-              Retyping.get_type_of env evd (EConstr.of_constr string_mk)
+              Retyping.get_type_of env evd (EConstr.of_constr string_of_chars)
             in
             let _, list_char, _ = EConstr.destProd evd ty in
             let list, char =
@@ -1948,7 +1930,7 @@ let rec to_constr =
             EConstr.to_constr evd mkChar)
           ()
       in
-      ret (mk_string char string list UVars.Instance.empty mkChar s)
+      ret (mk_string char string_of_chars list UVars.Instance.empty mkChar s)
 
 and instantiate n univs uconv =
   assert (List.length univs < Sys.int_size);
@@ -1997,9 +1979,10 @@ and ensure_exists n i =
         | exception Not_found -> CErrors.user_err Pp.(str "missing " ++ N.pp n))))
 
 and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
+  let predeclared = get_predeclared_def_some n i in
   let ref, algs =
-    match get_predeclared_def_some n i with
-    | Some ((UInt32_size | Nat_isValidChar), _, (def_name, c)) ->
+    match predeclared with
+    | Some (_, _, (def_name, c)) ->
       (* Hack to let the user predeclare some constants
          TODO make a more general Register-like API? *)
       Feedback.msg_info Pp.(Id.print def_name ++ str " is predeclared");
@@ -2059,9 +2042,16 @@ and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
       | LegacyHint | RegularHint _ ->
         let h = match hint with RegularHint h -> h | _ -> height n body in
         height_cache := N.Map.add n h !height_cache;
-        strategy (Conv_oracle.Level (-h))
+        (* Nat.pow unfolds late: the kernel evaluates it on literals *)
+        let level = match predeclared with Some (Pow, _, _) -> max 1 (-h) | _ -> -h in
+        strategy (Conv_oracle.Level level)
   in
   let () = add_declared n i inst in
+  let () =
+    match List.find_opt (fun (m, _) -> N.equal n m) peano_nat_workers, inst.ref with
+    | Some (_, register), GlobRef.ConstRef c when Int.equal i 0 -> register c
+    | _ -> ()
+  in
   inst
 
 and declare_ax { name = n; ty; univs } i =
@@ -2153,7 +2143,8 @@ and declare_ind inds i =
       in
       (mind, [], univs, [ (n, ind_name, [ cname ], squashy) ])
     | [ _ ], Some
-        ( ((Nat | Nat_le | Or | And | Fin | UInt32 | Char) as k),
+        ( ((False | Decidable | Bool | Nat | Nat_le | Or | And | Fin | UInt32 | BitVec | Char)
+           as k),
           _,
           (ind_name, mind) ) ->
       (* Hack to let the user predeclare various types before running Lean Import

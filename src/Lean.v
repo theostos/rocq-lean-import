@@ -1,4 +1,6 @@
-From Stdlib Require ZArith NArith Lia ZifyBool Uint63.
+(* not ZArith: loading less makes imports markedly faster *)
+From Stdlib Require BinInt BinNat Nnat Znat Lia ZifyBool.
+From Corelib Require Uint63Axioms.
 Declare ML Module "coq-lean-import.plugin".
 
 Set Universe Polymorphism.
@@ -21,6 +23,10 @@ Inductive eq_inst1@{|} {α:SProp} (a:α) : α -> SProp
   := eq_refl_inst1 : eq_inst1 a a.
 
 Register eq_inst1 as lean.Eq_inst1.
+
+Inductive Bool := Bool_false | Bool_true.
+
+Register Bool as lean.Bool.
 
 (* Inductive List@{u Lean.u+1.0} (α : Type@{Lean.u+1.0}) : Type@{Lean.u+1.0} :=
     List_nil : List@{u Lean.u+1.0} α
@@ -91,6 +97,7 @@ End Quot.
 Inductive Nat := Nat_zero : Nat | Nat_succ : Nat -> Nat.
 
 Register Nat as lean.Nat.
+Register Nat as kernel.ind_peano_nat.
 
 Fixpoint double (n : Nat) : Nat :=
   match n with
@@ -98,7 +105,7 @@ Fixpoint double (n : Nat) : Nat :=
   | Nat_succ n => Nat_succ (Nat_succ (double n))
   end.
 
-Register double as lean.Nat_double.
+Register double as kernel.peano_nat_double.
 
 Declare Scope Nat_scope.
 Delimit Scope Nat_scope with Nat.
@@ -129,9 +136,15 @@ Record And@{} (a a0 : SProp) : SProp := And_intro
 Register And as lean.And.
 
 Inductive sEmpty : SProp := .
+Register sEmpty as lean.False.
+
+Inductive Decidable (p : SProp) : Type :=
+| Decidable_isFalse : (p -> sEmpty) -> Decidable p
+| Decidable_isTrue : p -> Decidable p.
+Register Decidable as lean.Decidable.
 
 Section nat_notation.
-  Import ZifyClasses ZArith NArith.
+  Import ZifyClasses BinInt BinNat Nnat Znat.
   Fixpoint nat_of_Nat (n : Nat) : nat :=
     match n with
     | Nat_zero => 0
@@ -237,18 +250,85 @@ Number Notation Nat Nat_of_num_uint Nat_to_num_uint (abstract after 5000) : Nat_
 (* Tell the kernel to unfold these wrappers early, to speed things up *)
 #[global] Strategy -10000 [Nat_of_num_uint Nat_to_num_uint].
 
+Fixpoint Nat_add n m :=
+  match m with
+  | 0 => n
+  | Nat_succ p => Nat_succ (Nat_add n p)
+  end.
+
+Fixpoint Nat_mul n m :=
+  match m with
+  | 0 => 0
+  | Nat_succ p => Nat_add (Nat_mul n p) n
+  end.
+
+Fixpoint Nat_pow n m :=
+  match m with
+    | 0 => 1
+    | Nat_succ m => Nat_mul (Nat_pow n m) n
+  end.
+
+Definition Nat_pred n :=
+  match n with
+  | Nat_zero => Nat_zero
+  | Nat_succ n => n
+  end.
+
+Fixpoint Nat_sub n m :=
+  match m with
+  | Nat_zero => n
+  | Nat_succ m => Nat_pred (Nat_sub n m)
+  end.
+
+Register Nat_add as lean.Nat_add.
+Register Nat_add as kernel.peano_nat_add.
+Register Nat_mul as lean.Nat_mul.
+Register Nat_mul as kernel.peano_nat_mul.
+Register Nat_pow as lean.Nat_pow.
+Register Nat_pow as kernel.peano_nat_pow.
+Register Nat_pred as lean.Nat_pred.
+Register Nat_sub as lean.Nat_sub.
+Register Nat_sub as kernel.peano_nat_sub.
+
+Import BinNat.
+
+(* Nat literals: the kernel evaluates [CompactNat] on demand *)
+Fixpoint CompactPos (p : positive) : Nat :=
+  match p with
+  | xH => Nat_succ Nat_zero
+  | xO p => double (CompactPos p)
+  | xI p => Nat_succ (double (CompactPos p))
+  end.
+
+Definition CompactNat (n : N) : Nat :=
+  match n with
+  | N0 => Nat_zero
+  | Npos p => CompactPos p
+  end.
+
+Register CompactNat as lean.Nat_of_N.
+Register CompactNat as kernel.peano_nat_of_N.
+
 #[local] Set Warnings "-abstract-large-number".
-Definition UInt32_size : Nat := 0x100000000%Nat.
+Definition UInt32_size : Nat := Nat_pow 2 32.
 Register UInt32_size as lean.UInt32_size.
 
 Record Fin@{} (n : Nat) := Fin_mk { val : Nat; isLt : (val < n)%Nat }.
 Register Fin as lean.Fin.
-Record UInt32@{} := UInt32_mk { val0 : Fin UInt32_size }.
+
+Record BitVec@{} (w : Nat) := BitVec_ofFin { toFin : Fin (Nat_pow 2 w) }.
+Register BitVec as lean.BitVec.
+
+Record UInt32@{} := UInt32_ofBitVec { toBitVec : BitVec 32 }.
 Register UInt32 as lean.UInt32.
+
+Definition UInt32_toNat (n : UInt32) : Nat :=
+  n.(toBitVec).(toFin _).(val _).
+Register UInt32_toNat as lean.UInt32_toNat.
 
 
 Section strings.
-  Import ZArith NArith Lia Zify ZifyBool.
+  Import BinInt BinNat Nnat Znat Lia Zify ZifyBool.
   Variant InvalidUInt32 (n : N) : Set := invalid_uint32.
   Variant InvalidChar (n : N) : Set := invalid_char.
   #[local] Set Warnings "-abstract-large-number".
@@ -292,24 +372,110 @@ Section strings.
   #[local] Open Scope Nat_scope.
 
   Definition Nat_isValidChar (n : Nat) : SProp
-    := n < 0xd800 \/ (0xdfff < n /\ n < 0x110000).
+    := n < CompactNat 0xd800%N \/
+       (CompactNat 0xdfff%N < n /\ n < CompactNat 0x110000%N).
+
+  Definition UInt32_isValidChar (n : UInt32) : SProp :=
+    Nat_isValidChar n.(toBitVec).(toFin _).(val _).
 
   Record Char@{} := Char_mk
-  { val1 : UInt32; valid : Nat_isValidChar val1.(val0).(val _) }.
+  { val1 : UInt32; valid : Nat_isValidChar val1.(toBitVec).(toFin _).(val _) }.
 
   Definition check_N_isValidChar (n : N) : bool
     := ((n <? 0xd800) || ((0xdfff <? n) && (n <? 0x110000)))%N%bool.
 
-  Definition Fin_mk_N (n : N) (val : N) (isLt : (val <? n)%N = true) : Fin (Nat_of_N n)
-    := Fin_mk (Nat_of_N n) (Nat_of_N val) (Nat_lt_to_N val n isLt).
+  Lemma Nat_nat_add n m : Nat_of_nat (n + m) = Nat_add (Nat_of_nat n) (Nat_of_nat m).
+  Proof.
+    rewrite Nat.add_comm.
+    induction m.
+    - reflexivity.
+    - simpl. now f_equal.
+  Qed.
+
+  Lemma Nat_nat_mul n m : Nat_of_nat (n * m) = Nat_mul (Nat_of_nat n) (Nat_of_nat m).
+  Proof.
+    rewrite Nat.mul_comm.
+    induction m; simpl.
+    - reflexivity.
+    - rewrite Nat.add_comm, Nat_nat_add. now f_equal.
+  Qed.
+
+  Lemma Nat_nat_pow n m : Nat_of_nat (n ^ m) = Nat_pow (Nat_of_nat n) (Nat_of_nat m).
+  Proof.
+    induction m; simpl.
+    - reflexivity.
+    - rewrite Nat.mul_comm, Nat_nat_mul. now f_equal.
+  Qed.
+
+  Lemma Nat_pow_comm (n : N) : Nat_of_N (2 ^ n) = Nat_pow 2 (Nat_of_N n).
+  Proof.
+    unfold Nat_of_N. rewrite N2Nat.inj_pow.
+    eapply Nat_nat_pow.
+  Qed.
+
+  Lemma double_Nat_of_nat (n : nat) :
+    double (Nat_of_nat n) = Nat_of_nat (n + n).
+  Proof.
+    induction n as [|n IHn].
+    - reflexivity.
+    - cbn [double Nat_of_nat Nat.add].
+      rewrite Nat.add_succ_r, IHn.
+      reflexivity.
+  Qed.
+
+  Lemma CompactPos_eq_Nat_of_nat (p : positive) :
+    CompactPos p = Nat_of_nat (Pos.to_nat p).
+  Proof.
+    induction p as [p IHp | p IHp |].
+    - rewrite Pos2Nat.inj_xI.
+      replace (2 * Pos.to_nat p)%nat with
+        (Pos.to_nat p + Pos.to_nat p)%nat by lia.
+      cbn [CompactPos Nat_of_nat].
+      now rewrite IHp, double_Nat_of_nat.
+    - rewrite Pos2Nat.inj_xO.
+      replace (2 * Pos.to_nat p)%nat with
+        (Pos.to_nat p + Pos.to_nat p)%nat by lia.
+      cbn [CompactPos].
+      now rewrite IHp, double_Nat_of_nat.
+    - reflexivity.
+  Qed.
+
+  Lemma CompactNat_eq_Nat_of_N (n : N) : CompactNat n = Nat_of_N n.
+  Proof.
+    destruct n as [|p].
+    - reflexivity.
+    - apply CompactPos_eq_Nat_of_nat.
+  Qed.
+
+  Lemma CompactNat_pow_comm (n : N) :
+    CompactNat (2 ^ n) = Nat_pow 2 (CompactNat n).
+  Proof.
+    rewrite !CompactNat_eq_Nat_of_N.
+    apply Nat_pow_comm.
+  Qed.
+
+  Lemma Nat_lt_to_N_pow (n : N) (m : N) :
+    (n <? 2 ^ m)%N = true -> Nat_of_N n < Nat_pow 2 (CompactNat m).
+  Proof.
+    rewrite <- CompactNat_pow_comm, CompactNat_eq_Nat_of_N.
+    apply Nat_lt_to_N.
+  Qed.
+
+  Definition Fin_mk_N_pow (n : N) (val : N)
+      (isLt : (val <? 2 ^ n)%N = true) :
+      Fin (Nat_pow 2 (CompactNat n)) :=
+    Fin_mk (Nat_pow 2 (CompactNat n)) (Nat_of_N val)
+      (Nat_lt_to_N_pow val n isLt).
 
   Definition UInt32_mk_N (val : N) (isLt : (val <? 0x100000000)%N = true) : UInt32
-    := UInt32_mk (Fin_mk_N 0x100000000 val isLt).
+    := UInt32_ofBitVec (BitVec_ofFin 32 (Fin_mk_N_pow 32 val isLt)).
 
   Lemma Nat_isValidChar_mk_N (n : N) (isLt : check_N_isValidChar n = true)
     : Nat_isValidChar (Nat_of_N n).
   Proof.
-    cbv [Nat_isValidChar Nat_of_num_uint check_N_isValidChar] in *.
+    unfold Nat_isValidChar.
+    rewrite !CompactNat_eq_Nat_of_N.
+    cbv [Nat_of_num_uint check_N_isValidChar] in *.
     pose proof (Nat_lt_to_N n 0xd800) as H1.
     pose proof (Nat_lt_to_N 0xdfff n) as H2.
     pose proof (Nat_lt_to_N n 0x110000) as H3.
@@ -343,8 +509,8 @@ Section strings.
        | false => fun _ => invalid_char val
        end Logic.eq_refl.
 
-  Definition reflective_Char_mk_prim (val : Uint63.int)
-    := reflective_Char_mk (Z.to_N (Uint63.to_Z val)).
+  Definition reflective_Char_mk_prim (val : PrimInt63.int)
+    := reflective_Char_mk (Z.to_N (Uint63Axioms.to_Z val)).
 
 
   (* Definition reflective_UInt32_mk (val : N) : if (val <? 0x100000000)%N
@@ -356,8 +522,8 @@ Section strings.
        | false => fun _ => invalid_uint32 val
        end Logic.eq_refl.
 
-  Definition reflective_UInt32_mk_prim (val : Uint63.int)
-    := reflective_UInt32_mk (Z.to_N (Uint63.to_Z val)).
+  Definition reflective_UInt32_mk_prim (val : PrimInt63.int)
+    := reflective_UInt32_mk (Z.to_N (Uint63Axioms.to_Z val)).
 
 
   Definition check_isValidChar (n : Nat) : bool
@@ -395,5 +561,6 @@ Section strings.
 End strings.
 
 Register Nat_isValidChar as lean.Nat_isValidChar.
+Register UInt32_isValidChar as lean.UInt32_isValidChar.
 Register Char as lean.Char.
 Register reflective_Char_mk_prim as lean.Char.mk.reflective_prim.
