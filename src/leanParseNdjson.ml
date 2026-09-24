@@ -288,14 +288,26 @@ let parse_ind_val ~lcnt state ind_json ctor_jsons =
         LeanParseShared.fix_ctor name nparams ctor_ty)))
   in
   let univs = level_params ~lcnt state ind_json in
-  Entry (Ind { name; params; ty; ctors; univs })
+  { name; params; ty; ctors; univs }
 
 let parse_inductive ~lcnt state payload =
   let types = require_list ~lcnt "types" payload in
   let ctors = require_list ~lcnt "ctors" payload in
-  match types with
-  | [ ind_json ] -> (state, Some (parse_ind_val ~lcnt state ind_json ctors))
-  | _ -> err ~lcnt "mutual inductive groups are not supported by the current importer model"
+  if types = [] then err ~lcnt "empty inductive group";
+  let used = ref 0 in
+  let ctors_of ind =
+    let name = require_int ~lcnt "name" ind in
+    List.map
+      (fun id ->
+        let id = as_int ~lcnt id in
+        match List.find_opt (fun ctor -> require_int ~lcnt "name" ctor = id) ctors with
+        | Some ctor when require_int ~lcnt "induct" ctor = name -> incr used; ctor
+        | _ -> err ~lcnt "constructor does not belong to its inductive")
+      (require_list ~lcnt "ctors" ind)
+  in
+  let inds = List.map (fun ind -> parse_ind_val ~lcnt state ind (ctors_of ind)) types in
+  if !used <> List.length ctors then err ~lcnt "inductive constructor count mismatch";
+  (state, Some (MutualInd inds))
 
 let parse_meta ~lcnt state json =
   let meta = require_member ~lcnt "meta" json in

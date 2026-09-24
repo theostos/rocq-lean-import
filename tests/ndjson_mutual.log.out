@@ -1,0 +1,23 @@
+line 119: Tree
+line 119: Forest
+line 125: tree1
+line 200: Even
+line 200: Odd
+line 258: A
+line 258: B
+line 260: even_zero
+line 375: PT
+line 375: PF
+line 390: PUnit
+line 402: pt1
+line 416: True
+line 426: pt2
+
+
+Done!
+- 14 entries (17 possible instances).
+- 5 universe expressions
+- 63 names
+- 349 expression nodes
+Max universe instance length 1.
+0 inductives have non syntactically arity types.

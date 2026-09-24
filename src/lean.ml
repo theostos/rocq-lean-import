@@ -103,47 +103,87 @@ let occur_mind mind term =
       Coq (handled by caller)
     - Lean puts induction hypotheses after all the constructor arguments, Coq
       puts them immediately after the corresponding recursive argument. *)
-let lean_scheme env ~dep mind u s =
+let lean_scheme env ~dep (mind, ind_index) u s =
   let mib = Global.lookup_mind mind in
   let nparams = mib.mind_nparams in
-  assert (Array.length mib.mind_packets = 1);
+  let ntypes = Array.length mib.mind_packets in
   (* if we start using non recursive params in the translation it will
      involve reordering arguments *)
   assert (nparams = mib.mind_nparams_rec);
-  let mip = mib.mind_packets.(0) in
-
   let body =
     let sigma = Evd.from_env env in
-    let sigma, s' = match s with
-      | LSProp -> sigma, EConstr.ESorts.sprop
+    let sigma, s', motive =
+      match s with
+      | LSProp -> (sigma, EConstr.ESorts.sprop, None)
       | Level _ ->
         let sigma, u = Evd.new_univ_level_variable UnivRigid sigma in
-        sigma, EConstr.ESorts.make @@ Sorts.sort_of_univ @@ Universe.make u
+        (sigma, EConstr.ESorts.make (Sorts.sort_of_univ (Universe.make u)), Some u)
     in
     let sigma, body =
-      Indrec.build_induction_scheme env sigma
-        ((mind, 0), EConstr.EInstance.make u)
-        dep s'
+      if ntypes = 1 then
+        Indrec.build_induction_scheme env sigma
+          ((mind, ind_index), EConstr.EInstance.make u)
+          dep s'
+      else
+        let specs = List.init ntypes (fun k -> ((mind, k), dep, s')) in
+        let sigma, bodies =
+          Indrec.build_mutual_induction_scheme env sigma ~force_mutual:true specs
+            (EConstr.EInstance.make u)
+        in
+        (sigma, List.nth bodies ind_index)
     in
     let body = EConstr.Unsafe.to_constr body in
-    let uctx = Evd.sort_context_set sigma in
-    match s with
-    | LSProp ->
-      assert (UnivGen.is_empty_sort_context uctx);
-      body
-    | Level s ->
-      let (_, us), cst = uctx in
-      assert (
-        Level.Set.cardinal us = 1 && PConstraints.is_empty cst);
-      let v = Level.Set.choose us in
-      Vars.subst_univs_level_constr
-        (Sorts.QVar.Map.empty, Level.Map.singleton v s)
-        body
+    (* A mutual scheme comes with sort variables and levels of its own: map
+       the qualities to the motive's, and each level to an equal level of the
+       instance if there is one, otherwise to the motive level (Set in SProp). *)
+    let quality, default_level, usubst =
+      match (s, motive) with
+      | LSProp, _ -> (Sorts.Quality.qsprop, Level.set, Level.Map.empty)
+      | Level s, Some v -> (Sorts.Quality.qtype, s, Level.Map.singleton v s)
+      | Level _, None -> assert false
+    in
+    let (qvars, levels), csts = Evd.sort_context_set sigma in
+    let body_qvars, _ = Vars.sort_and_universes_of_constr body in
+    let qsubst =
+      Sorts.QVar.Set.fold (fun q -> Sorts.QVar.Map.add q quality) qvars Sorts.QVar.Map.empty
+    in
+    let qsubst =
+      Sorts.Quality.Set.fold
+        (fun q qsubst ->
+          match q with
+          | Sorts.Quality.QVar q -> Sorts.QVar.Map.add q quality qsubst
+          | Sorts.Quality.QConstant _ | Sorts.Quality.QGlobal _ -> qsubst)
+        body_qvars qsubst
+    in
+    let allowed =
+      Array.fold_right Level.Set.add (snd (Instance.to_array u)) (Level.Set.singleton Level.set)
+    in
+    let graph =
+      Level.Set.fold
+        (fun l graph ->
+          try UGraph.add_universe l ~strict:false graph with UGraph.AlreadyDeclared -> graph)
+        levels (Environ.universes env)
+    in
+    let graph = UGraph.merge_constraints (PConstraints.univs csts) graph in
+    let usubst =
+      Level.Set.fold
+        (fun l usubst ->
+          if Level.Map.mem l usubst || Level.Set.mem l allowed then usubst
+          else
+            let equal a = UGraph.check_eq graph (Universe.make l) (Universe.make a) in
+            let target =
+              match List.find_opt equal (Level.Set.elements allowed) with
+              | Some a -> a
+              | None -> default_level
+            in
+            Level.Map.add l target usubst)
+        levels usubst
+    in
+    Vars.subst_univs_level_constr (qsubst, usubst) body
   in
-
-  assert (
-    CArray.for_all2 Int.equal mip.mind_consnrealargs mip.mind_consnrealdecls);
-  let recinfo =
+  let recinfo (mip : Declarations.one_inductive_body) =
+    assert (
+      CArray.for_all2 Int.equal mip.mind_consnrealargs mip.mind_consnrealdecls);
     Array.mapi
       (fun i (args, _) ->
         let nargs = mip.mind_consnrealargs.(i) in
@@ -156,6 +196,7 @@ let lean_scheme env ~dep mind u s =
           args)
       mip.mind_nf_lc
   in
+  let recinfo = Array.concat (Array.to_list (Array.map recinfo mib.mind_packets)) in
   let hasrec =
     (* NB: if the only recursive arg is the last arg, no need for reordering *)
     Array.exists
@@ -174,13 +215,12 @@ let lean_scheme env ~dep mind u s =
     *)
     let open Constr in
     let nlc = Array.length recinfo in
-    let paramsP, inside = Term.decompose_lambda_n_assum (nparams + 1) body in
+    let paramsP, inside = Term.decompose_lambda_n_assum (nparams + ntypes) body in
     let fcs, inside = Term.decompose_lambda_n nlc inside in
     let fcs = List.rev fcs in
 
     let body =
-      mkApp
-        (body, Array.init (nparams + 1) (fun i -> mkRel (nlc + nparams + 1 - i)))
+      mkApp (body, Array.init (nparams + ntypes) (fun i -> mkRel (nlc + nparams + ntypes - i)))
     in
     let body =
       mkApp
@@ -815,8 +855,33 @@ let constructor_owners : N.t N.Map.t ref =
 let add_constructor_owners (ind : ind) owners =
   List.fold_left (fun owners (c, _) -> N.Map.add c ind.name owners) owners ind.ctors
 
+(* Member name -> whole mutual block: a universe instance of a member is
+   declared as the block. *)
+let mutual_entries : ind list N.Map.t ref =
+  Summary.ref ~name:"lean-mutual-entries" N.Map.empty
+
 let squash_info : squashy N.Map.t ref =
   Summary.ref ~name:"lean-squash-info" N.Map.empty
+
+(* Constructor types of a block [names] refer to their own inductive as
+   [Bound nparams] and to the others by name; rebind them to the context of
+   the block, where the first inductive is the deepest. *)
+let remap_mutual_ctor ~nparams ~names own =
+  let ntypes = List.length names in
+  let bound k depth = Bound (nparams + ntypes - 1 - k + depth) in
+  let index name = try Some (CList.index0 N.equal name names) with Not_found -> None in
+  let rec remap depth = function
+    | Bound k when k = nparams + depth -> bound (CList.index0 N.equal own names) depth
+    | Const (name, _) as e -> (match index name with Some k -> bound k depth | None -> e)
+    | (Bound _ | Sort _ | Nat _ | String _) as e -> e
+    | App (f, x) -> App (remap depth f, remap depth x)
+    | Let { name; ty; v; rest } ->
+      Let { name; ty = remap depth ty; v = remap depth v; rest = remap (depth + 1) rest }
+    | Lam (bk, name, ty, body) -> Lam (bk, name, remap depth ty, remap (depth + 1) body)
+    | Pi (bk, name, ty, body) -> Pi (bk, name, remap depth ty, remap (depth + 1) body)
+    | Proj (name, field, c) -> Proj (name, field, remap depth c)
+  in
+  remap 0
 
 let add_declared n i inst =
   declared :=
@@ -1257,12 +1322,17 @@ and ensure_exists n i =
       ignore (ensure_exists ind i);
       !declared |> N.Map.find n |> Int.Map.find i
     | None ->
-      (match N.Map.find n !entries with
-      | Def def -> declare_def def i
-      | Ax ax -> declare_ax ax i
-      | Ind ind -> declare_ind ind i
-      | Quot _ -> CErrors.user_err Pp.(str "quot must be predeclared")
-      | exception Not_found -> CErrors.user_err Pp.(str "missing " ++ N.pp n)))
+      (match N.Map.find_opt n !mutual_entries with
+      | Some inds ->
+        ignore (declare_ind inds i);
+        !declared |> N.Map.find n |> Int.Map.find i
+      | None ->
+        (match N.Map.find n !entries with
+        | Def def -> declare_def def i
+        | Ax ax -> declare_ax ax i
+        | Ind ind -> declare_ind [ ind ] i
+        | Quot _ -> CErrors.user_err Pp.(str "quot must be predeclared")
+        | exception Not_found -> CErrors.user_err Pp.(str "missing " ++ N.pp n))))
 
 and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
   let ref, algs =
@@ -1339,11 +1409,12 @@ and to_params uconv params =
   in
   (acc, List.rev params)
 
-and declare_ind { name = n; params; ty; ctors; univs } i =
+and declare_ind inds i =
+  let { name = n; params; univs; _ } = List.hd inds in
   (* Handle inductives predeclared as definitions (e.g., ULift with cumulativity).
      We check if there's a cumul registration for this specific instance. *)
-  match get_predeclared_ind_as_def_some n i with
-  | Some (ULift_cumul, _, _) ->
+  match (inds, get_predeclared_ind_as_def_some n i) with
+  | [ _ ], Some (ULift_cumul, _, _) ->
     let def_name = name_for_core n i in
     let cumul_reg nm = "lean." ^ Id.to_string (name_for_core nm i) ^ ".cumul" in
     Feedback.msg_info Pp.(Id.print def_name ++ str " is predeclared (cumulative)");
@@ -1377,10 +1448,11 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
     add_declared nrec (2 * i) { ref = Rocqlib.lib_ref rec_base; algs = algs_rec };
     add_declared nrec ((2 * i) + 1) { ref = Rocqlib.lib_ref (rec_base ^ ".ind"); algs = algs_2 };
     inst
-  | None ->
-  let mind, algs, ind_name, cnames, univs, squashy =
-    match get_predeclared_ind_some n i with
-    | Some (Eq, _, (ind_name, mind)) ->
+  | _ ->
+  (* the block, and for each of its inductives: name, Rocq name, constructors, squashiness *)
+  let mind, algs, univs, packets =
+    match (inds, get_predeclared_ind_some n i) with
+    | [ _ ], Some (Eq, _, (ind_name, mind)) ->
       (* Hack to let the user predeclare eq and quot before running Lean Import
          TODO make a more general Register-like API? *)
       Feedback.msg_info Pp.(Id.print ind_name ++ str " is predeclared");
@@ -1398,8 +1470,8 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
         | 1 -> UContext.empty
         | _ -> assert false
       in
-      (mind, [], ind_name, [ cname ], univs, squashy)
-    | Some
+      (mind, [], univs, [ (n, ind_name, [ cname ], squashy) ])
+    | [ _ ], Some
         ( ((Nat | Nat_le | Or | And | Fin | UInt32 | Char) as k),
           _,
           (ind_name, mind) ) ->
@@ -1409,43 +1481,68 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
       Feedback.msg_info Pp.(Id.print ind_name ++ str " is predeclared");
       let cnames = get_predeclared_cnames k n in
       let squashy = N.Map.get n !squash_info in
-      (mind, [], ind_name, cnames, UContext.empty, squashy)
-    | None ->
+      (mind, [], UContext.empty, [ (n, ind_name, cnames, squashy) ])
+    | _ ->
+      let ntypes = List.length inds in
+      List.iter
+        (fun ind ->
+          if ind.params <> params || ind.univs <> univs then
+            CErrors.user_err
+              Pp.(str "Mutual inductives have different parameters or universes"))
+        (List.tl inds);
+      let names = List.map (fun ind -> ind.name) inds in
+      let nparams = List.length params in
       let uconv = start_uconv univs i in
       let (env_params, uconv), params = to_params uconv params in
-      let uconv, ty = to_constr env_params ty uconv in
-      let indices, sort =
-        let env_params =
-          Environ.set_rel_context_val env_params
-            (Environ.set_universes uconv.graph (Global.env ()))
-        in
-        Reduction.dest_arity env_params ty
+      let uconv, arities =
+        CList.fold_left_map
+          (fun uconv ind ->
+            let uconv, ty = to_constr env_params ind.ty uconv in
+            let indices, sort =
+              let env_params =
+                Environ.set_rel_context_val env_params
+                  (Environ.set_universes uconv.graph (Global.env ()))
+              in
+              Reduction.dest_arity env_params ty
+            in
+            (uconv, (ty, indices, sort)))
+          uconv inds
       in
-      let env_ind =
-        Environ.push_rel_context_val
-          (LocalAssum
-             ( Context.make_annot (N.to_name n) (Sorts.relevance_of_sort sort),
-               Term.it_mkProd_or_LetIn ty params ))
-          empty_env
+      let env_inds =
+        List.fold_left2
+          (fun env ind (ty, _, sort) ->
+            Environ.push_rel_context_val
+              (LocalAssum
+                 ( Context.make_annot (N.to_name ind.name) (Sorts.relevance_of_sort sort),
+                   Term.it_mkProd_or_LetIn ty params ))
+              env)
+          empty_env inds arities
       in
       let env_ind_params =
         Context.Rel.fold_outside Environ.push_rel_context_val params
-          ~init:env_ind
+          ~init:env_inds
       in
-      let uconv, ctors =
-        CList.fold_left_map
-          (fun uconv (n, ty) ->
-            let uconv, ty = to_constr env_ind_params ty uconv in
-            (uconv, (n, ty)))
-          uconv ctors
+      let uconv, packets =
+        CList.fold_left2_map
+          (fun uconv ind (ty, _, _) ->
+            let uconv, ctys =
+              CList.fold_left_map
+                (fun uconv (_, cty) ->
+                  let cty =
+                    if ntypes = 1 then cty else remap_mutual_ctor ~nparams ~names ind.name cty
+                  in
+                  to_constr env_ind_params cty uconv)
+                uconv ind.ctors
+            in
+            (uconv, (ind, name_for ind.name i, ty, ctys)))
+          uconv inds arities
       in
-      let cnames, ctys = List.split ctors in
       let graph = uconv.graph in
       let univs, algs = univ_entry_gen uconv univs in
-      let ind_name = name_for n i in
-      let record, fields, ctys =
-        match (indices, ctys) with
-        | [], [ cty ] ->
+      let record, fields, packets =
+        match (packets, arities) with
+        | [ (ind, ind_name, ty, ([ cty ] as ctys)) ], [ (_, [], sort) ] ->
+          let record, fields, ctys =
           cty
           |> with_env_evm env_ind_params uconv (fun env evm cty ->
                  let fields, codom =
@@ -1509,7 +1606,9 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
                    then (Some (Some [| default_proj_id |]), fields, [ cty' ])
                    else (None, [], ctys)
                  | _ :: _, _, true -> (None, [], ctys))
-        | _ -> (None, [], ctys)
+          in
+          (record, fields, [ (ind, ind_name, ty, ctys) ])
+        | _ -> (None, [], packets)
       in
       let entry finite =
         {
@@ -1517,26 +1616,33 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
           mind_entry_record = record;
           mind_entry_finite = finite;
           mind_entry_inds =
-            [
-              {
-                mind_entry_typename = ind_name;
-                mind_entry_arity = ty;
-                mind_entry_consnames = List.map (fun n -> name_for n i) cnames;
-                mind_entry_lc = ctys;
-              };
-            ];
+            List.map
+              (fun (ind, ind_name, ty, ctys) ->
+                {
+                  Entries.mind_entry_typename = ind_name;
+                  mind_entry_arity = ty;
+                  mind_entry_consnames = List.map (fun (c, _) -> name_for c i) ind.ctors;
+                  mind_entry_lc = ctys;
+                })
+              packets;
           mind_entry_private = None;
           mind_entry_universes = Polymorphic_ind_entry univs;
           mind_entry_variance = None;
         }
       in
       let squashy = N.Map.get n !squash_info in
+      (* Rocq's own squashing is only overridden for a single inductive. *)
       let coq_squashes =
-        if squashy.maybe_prop then coq_squashes graph (entry Finite) else false
+        match inds with
+        | [ _ ] when squashy.maybe_prop -> coq_squashes graph (entry Finite)
+        | _ -> false
       in
       let mind =
         let act finite =
-          DeclareInd.declare_mutual_inductive_with_eliminations (entry finite)
+          (* no Rocq schemes for a block, only the Lean eliminators below *)
+          DeclareInd.declare_mutual_inductive_with_eliminations
+            ~schemes:(match inds with [ _ ] -> DeclareInd.Default | _ -> DeclareInd.None)
+            (entry finite)
             (* the ubinders API is kind of shit here *)
             (UState.Polymorphic_entry UContext.empty, UnivNames.empty_binders)
             []
@@ -1546,13 +1652,13 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
         else with_unsafe_univs act ()
       in
       assert (
-        squashy.lean_squashes
+        ntypes > 1 || squashy.lean_squashes
         || (Global.lookup_mind mind).mind_packets.(0).mind_squashed == None);
       (* Declare projections if the inductive is a record *)
       let () =
         match record with
         | Some (Some _) ->
-          let inhabitant_id = ind_name in
+          let _, inhabitant_id, _, _ = List.hd packets in
           let kind = Decls.StructureComponent in
           let proj_flags =
             List.map
@@ -1570,21 +1676,30 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
                proj_flags implfs)
         | _ -> ()
       in
-      (mind, algs, ind_name, cnames, univs, squashy)
+      ( mind,
+        algs,
+        univs,
+        List.map
+          (fun (ind, ind_name, _, _) ->
+            (ind.name, ind_name, List.map fst ind.ctors, N.Map.get ind.name !squash_info))
+          packets )
   in
 
-  (* add ind and ctors to [declared] *)
-  let inst = { ref = GlobRef.IndRef (mind, 0); algs } in
-  let () = add_declared n i inst in
-  let () =
-    CList.iteri
-      (fun cnum cname ->
-        add_declared cname i
-          { ref = GlobRef.ConstructRef ((mind, 0), cnum + 1); algs })
-      cnames
-  in
+  (* add inds and ctors to [declared] *)
+  List.iteri
+    (fun k (n, _, cnames, _) ->
+      add_declared n i { ref = GlobRef.IndRef (mind, k); algs };
+      CList.iteri
+        (fun cnum cname ->
+          add_declared cname i { ref = GlobRef.ConstructRef ((mind, k), cnum + 1); algs })
+        cnames)
+    packets;
 
-  (* elim *)
+  List.iteri (declare_schemes ~i ~univs ~algs mind) packets;
+  { ref = GlobRef.IndRef (mind, 0); algs }
+
+(* the Lean eliminators of the [k]th inductive of the block *)
+and declare_schemes ~i ~univs ~algs mind k (n, ind_name, _, squashy) =
   let make_scheme fam =
     let u =
       if fam = SchemeSProp then LSProp
@@ -1622,7 +1737,7 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
       (inst, uentry)
     in
     (* lean 4 change: always dep? was not squashy.always_prop*)
-    (lean_scheme env ~dep:true mind inst u, uentry)
+    (lean_scheme env ~dep:true (mind, k) inst u, uentry)
   in
   let nrec = N.append n "rec" in
   let elims =
@@ -1661,53 +1776,47 @@ and declare_ind { name = n; params; ty; ctors; univs } i =
     in
     add_declared nrec j elim
   in
-  let () =
-    List.iter
-      (fun x ->
-        try declare_one_scheme x
-        with e when CErrors.noncritical e && error_mode e = Skip ->
-          Feedback.msg_info Pp.(str "Skipping scheme"))
-      elims
-  in
-  inst
+  List.iter
+    (fun x ->
+      try declare_one_scheme x
+      with e when CErrors.noncritical e && error_mode e = Skip ->
+        Feedback.msg_info Pp.(str "Skipping scheme"))
+    elims
 
-(** Generate and add the squashy info *)
-let squashify { name = n; params; ty; ctors; univs } =
-  let uconvP =
-    (* NB: if univs = [] this is just instantiation 0 *)
-    start_uconv univs ((1 lsl List.length univs) - 1)
-  in
-  let (env_paramsP, uconvP), paramsP = to_params uconvP params in
-  let uconvP, tyP = to_constr env_paramsP ty uconvP in
-  let envP =
-    Environ.push_rel_context paramsP
-      (Environ.set_universes uconvP.graph (Global.env ()))
-  in
-  let _, sortP = Reduction.dest_arity envP tyP in
+(** Squashy info of the [k]th inductive of a block whose arities have sorts
+    [aritiesP] at the all-SProp instance and [aritiesT] at instance 0. *)
+let squashy inds aritiesP aritiesT k { name = n; params; ctors; _ } =
+  let _, sortP = List.nth aritiesP k in
   if not (Sorts.is_sprop sortP) then noprop
   else
-    let uconvT = start_uconv univs 0 in
-    let (env_paramsT, uconvT), paramsT = to_params uconvT params in
-    let uconvT, tyT = to_constr env_paramsT ty uconvT in
-    let envT =
-      Environ.set_rel_context_val env_paramsT
-        (Environ.set_universes uconvT.graph (Global.env ()))
-    in
-    let _, sortT = Reduction.dest_arity envT tyT in
-    let always_prop = Sorts.is_sprop sortT in
-    match ctors with
-    | [] -> { maybe_prop = true; always_prop; lean_squashes = false }
-    | _ :: _ :: _ -> { maybe_prop = true; always_prop; lean_squashes = true }
-    | [ (_, ctor) ] ->
+    let uconvT, _, paramsT, aritiesT = Lazy.force aritiesT in
+    let always_prop = Sorts.is_sprop (snd (List.nth aritiesT k)) in
+    match (inds, ctors) with
+    | _ :: _ :: _, _ when always_prop ->
+      (* a mutual block in Prop only eliminates into Prop *)
+      { maybe_prop = true; always_prop; lean_squashes = true }
+    | _, [] -> { maybe_prop = true; always_prop; lean_squashes = false }
+    | _, _ :: _ :: _ -> { maybe_prop = true; always_prop; lean_squashes = true }
+    | _, [ (_, ctor) ] ->
+      let ntypes = List.length inds in
       let envT =
         Context.Rel.fold_outside Environ.push_rel_context_val paramsT
           ~init:
-            (Environ.push_rel_context_val
-               (LocalAssum
-                  ( Context.make_annot (N.to_name n)
-                      (Sorts.relevance_of_sort sortT),
-                    Term.it_mkProd_or_LetIn tyT paramsT ))
-               empty_env)
+            (List.fold_left2
+               (fun env ind (tyT, sortT) ->
+                 Environ.push_rel_context_val
+                   (LocalAssum
+                      ( Context.make_annot (N.to_name ind.name)
+                          (Sorts.relevance_of_sort sortT),
+                        Term.it_mkProd_or_LetIn tyT paramsT ))
+                   env)
+               empty_env inds aritiesT)
+      in
+      let ctor =
+        if ntypes = 1 then ctor
+        else
+          remap_mutual_ctor ~nparams:(List.length params)
+            ~names:(List.map (fun ind -> ind.name) inds) n ctor
       in
       let uconvT, ctorT = to_constr envT ctor uconvT in
       let envT =
@@ -1736,8 +1845,11 @@ let squashify { name = n; params; ty; ctors; univs } =
               else if Int.Set.mem (nargs - i) forced then false
               else
                 let t = RelDecl.get_type d in
-                if not (Vars.noccurn (npars + i + 1) t) then
-                  (* recursive argument *)
+                if
+                  List.exists
+                    (fun k -> not (Vars.noccurn (npars + i + 1 + k) t))
+                    (List.init ntypes Fun.id)
+                then (* recursive argument *)
                   false
                 else
                   not
@@ -1751,9 +1863,33 @@ let squashify { name = n; params; ty; ctors; univs } =
       (* TODO translate to use non recursively uniform params (fix extraction)*)
       { maybe_prop = true; always_prop; lean_squashes }
 
-let squashify ind =
-  let s = squashify ind in
-  squash_info := N.Map.add ind.name s !squash_info
+(** Generate and add the squashy info *)
+let squashify inds =
+  let first = List.hd inds in
+  (* the arities and their sorts, translated at instance [i] *)
+  let arities i =
+    let uconv = start_uconv first.univs i in
+    let (env_params, uconv), params = to_params uconv first.params in
+    let uconv, arities =
+      CList.fold_left_map
+        (fun uconv ind ->
+          let uconv, ty = to_constr env_params ind.ty uconv in
+          let env =
+            Environ.set_rel_context_val env_params
+              (Environ.set_universes uconv.graph (Global.env ()))
+          in
+          (uconv, (ty, snd (Reduction.dest_arity env ty))))
+        uconv inds
+    in
+    (uconv, env_params, params, arities)
+  in
+  (* NB: if univs = [] this is just instantiation 0 *)
+  let _, _, _, aritiesP = arities ((1 lsl List.length first.univs) - 1) in
+  let aritiesT = lazy (arities 0) in
+  List.iteri
+    (fun k ind ->
+      squash_info := N.Map.add ind.name (squashy inds aritiesP aritiesT k ind) !squash_info)
+    inds
 
 (* pairs of (name * number of univs) *)
 let quots = [ ("", 1); ("mk", 1); ("lift", 2); ("ind", 1) ]
@@ -1820,9 +1956,9 @@ let declare_def def =
 let declare_ax ax =
   declare_instances (fun i -> ignore (declare_ax ax i)) ax.univs
 
-let declare_ind ind =
-  let () = squashify ind in
-  declare_instances (fun i -> ignore (declare_ind ind i)) ind.univs
+let declare_ind inds =
+  let () = squashify inds in
+  declare_instances (fun i -> ignore (declare_ind inds i)) (List.hd inds).univs
 
 let entry_name = function
 | Quot name | Def { name } | Ax { name } | Ind { name } -> name
@@ -1833,12 +1969,24 @@ let add_entry entry =
     | Quot quot_name -> declare_quot quot_name
     | Def def -> declare_def def
     | Ax ax -> declare_ax ax
-    | Ind ind -> declare_ind ind
+    | Ind ind -> declare_ind [ ind ]
   in
   entries := N.Map.add (entry_name entry) entry !entries;
   match entry with
   | Ind ind -> constructor_owners := add_constructor_owners ind !constructor_owners
   | Def _ | Ax _ | Quot _ -> ()
+
+(* The inductives of a block are entries of their own, instantiated together. *)
+let add_inductives = function
+  | [ ind ] -> add_entry (Ind ind)
+  | inds ->
+    List.iter
+      (fun ind ->
+        entries := N.Map.add ind.name (Ind ind) !entries;
+        constructor_owners := add_constructor_owners ind !constructor_owners;
+        mutual_entries := N.Map.add ind.name inds !mutual_entries)
+      inds;
+    declare_ind inds
 
 let rec is_arity = function
   | Sort _ -> true
@@ -1954,66 +2102,99 @@ let unfreeze (lib, sum) =
   Lib.Interp.unfreeze lib;
   Summary.Interp.unfreeze_summaries sum
 
-let rec do_input parse state ~from ~until ch =
-  if until = Some !lcnt then begin
+(* Run a declaration at [line]; [None] when the import stops there. *)
+let declare state ch ~line ~raw ~name act =
+  (* freeze is actually pretty costly, so make sure we don't run it for non sideffect lines. *)
+  let st = freeze () in
+  match with_line_timeout act with
+  | () -> Some state
+  | exception e ->
+    let e = Exninfo.capture e in
+    let epp =
+      Pp.(
+        str "Error at line " ++ int line ++ str " (for " ++ N.pp name ++ str ")"
+        ++ str (": " ^ raw) ++ fnl () ++ CErrors.iprint e)
+    in
+    (* without this unfreeze, the global state.declared and the
+       global env are out of sync *)
+    unfreeze st;
+    match error_mode (fst e) with
+    | Skip ->
+      Feedback.msg_info Pp.(str "Skipping: " ++ epp);
+      Some { state with skips = state.skips + 1 }
+    | Stop ->
+      close_in ch;
+      finish ~completed:false state;
+      Feedback.msg_info epp;
+      None
+    | Fail ->
+      close_in ch;
+      CErrors.user_err epp
+
+(* Consecutive inductive lines form one mutual block, declared (under the line
+   of its first member) when a line of another kind follows. *)
+type pending = { line : int; raw : string; inds : ind list (* reversed *) }
+
+let declare_pending state ch = function
+  | None -> Some state
+  | Some { line; raw; inds } ->
+    let inds = List.rev inds in
+    declare state ch ~line ~raw ~name:(List.hd inds).name (fun () -> add_inductives inds)
+
+let rec do_input parse state ~from ~until ~pending ch =
+  let finished state =
     close_in ch;
     finish state;
     state
-  end
+  in
+  if until = Some !lcnt then
+    match declare_pending state ch pending with
+    | None -> state
+    | Some state -> finished state
   else
     match input_line ch with
     | exception End_of_file ->
-      close_in ch;
-      finish state;
-      if not (until = None) then CErrors.user_err Pp.(str "unexpected EOF!");
-      state
+      (match declare_pending state ch pending with
+      | None -> state
+      | Some state ->
+        let state = finished state in
+        if not (until = None) then CErrors.user_err Pp.(str "unexpected EOF!");
+        state)
     | _ when before_from from ->
       incr lcnt;
-      do_input parse state ~from ~until ch
-    | l ->
-      let pstate, oentry = do_line parse state.pstate l in
+      do_input parse state ~from ~until ~pending ch
+    | raw ->
+      let pstate, action = do_line parse state.pstate raw in
       let state = { state with pstate } in
-      (match (just_parse (), oentry) with
-      | true, _ | false, None ->
+      (match (just_parse (), action) with
+      | false, Some (Entry (Ind ind)) ->
+        let pending =
+          match pending with
+          | None -> Some { line = !lcnt; raw; inds = [ ind ] }
+          | Some pending -> Some { pending with inds = ind :: pending.inds }
+        in
         incr lcnt;
-        do_input parse state ~from ~until ch
-      | false, Some (Nota _) ->
-        (* notations not yet implemented *)
-        incr lcnt;
-        do_input parse state ~from ~until ch
-      | false, Some (Entry entry) ->
-        (* freeze is actually pretty costly, so make sure we don't run it for non sideffect lines. *)
-        let st = freeze () in
-        (match with_line_timeout (fun () -> add_entry entry) with
-        | () ->
-          incr lcnt;
-          do_input parse state ~from ~until ch
-        | exception e ->
-          let e = Exninfo.capture e in
-          let n = entry_name entry in
-          let epp =
-            Pp.(
-              str "Error at line " ++ int !lcnt ++ str " (for " ++ N.pp n
-              ++ str ")"
-              ++ str (": " ^ l)
-              ++ fnl () ++ CErrors.iprint e)
+        do_input parse state ~from ~until ~pending ch
+      | _ ->
+        (match declare_pending state ch pending with
+        | None -> state
+        | Some state ->
+          let declared =
+            match (just_parse (), action) with
+            | true, _ | false, None -> Some state
+            | false, Some (Nota _) -> Some state (* notations not yet implemented *)
+            | false, Some (Entry entry) ->
+              declare state ch ~line:!lcnt ~raw ~name:(entry_name entry) (fun () ->
+                  add_entry entry)
+            | false, Some (MutualInd inds) ->
+              declare state ch ~line:!lcnt ~raw ~name:(List.hd inds).name (fun () ->
+                  add_inductives inds)
           in
-          unfreeze st;
-          (* without this unfreeze, the global state.declared and the
-             global env are out of sync *)
-          (match error_mode (fst e) with
-          | Skip ->
-            Feedback.msg_info Pp.(str "Skipping: " ++ epp);
+          (match declared with
+          | None -> state
+          | Some state ->
             incr lcnt;
-            do_input parse { state with skips = state.skips + 1 } ~from ~until ch
-          | Stop ->
-            close_in ch;
-            finish ~completed:false state;
-            Feedback.msg_info epp;
-            state
-          | Fail ->
-            close_in ch;
-            CErrors.user_err epp)))
+            do_input parse state ~from ~until ~pending:None ch)))
 
 let do_input state ~from ~until ch =
   let start = pos_in ch in
@@ -2035,7 +2216,7 @@ let do_input state ~from ~until ch =
         parser := next;
         LeanParseNdjson.to_state next, action
   in
-  do_input parse state ~from ~until ch
+  do_input parse state ~from ~until ~pending:None ch
 
 let pstate = Summary.ref ~name:"lean-parse-state" LeanParse.empty_state
 
@@ -2050,6 +2231,7 @@ module Checkpoint = struct
     sets : Level.t Int.Map.t;
     declared : instantiation Int.Map.t N.Map.t;
     entries : C.saved_entry N.Map.t;
+    mutual_entries : C.saved_ind list N.Map.t;
     squash_info : squashy N.Map.t;
     heights : int N.Map.t;
   }
@@ -2060,10 +2242,12 @@ module Checkpoint = struct
   let format = 3
 
   let save () =
-    let parser, entries =
-      C.pack !pstate (fun save -> N.Map.map (C.save_entry save) !entries)
+    let parser, (entries, mutual_entries) =
+      C.pack !pstate (fun save ->
+        N.Map.map (C.save_entry save) !entries,
+        N.Map.map (List.map (C.save_ind save)) !mutual_entries)
     in
-    { parser; sets = !sets; declared = !declared; entries;
+    { parser; sets = !sets; declared = !declared; entries; mutual_entries;
       squash_info = !squash_info; heights = !height_cache }
 
   let restore saved =
@@ -2072,6 +2256,7 @@ module Checkpoint = struct
     sets := saved.sets;
     declared := saved.declared;
     entries := N.Map.map (C.load_entry load) saved.entries;
+    mutual_entries := N.Map.map (List.map (C.load_ind load)) saved.mutual_entries;
     constructor_owners :=
       N.Map.fold
         (fun _ entry owners ->
