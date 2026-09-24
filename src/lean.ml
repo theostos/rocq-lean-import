@@ -2925,11 +2925,15 @@ let do_line parse state l =
     Exninfo.iraise e
 
 let before_from = function None -> false | Some from -> !lcnt < from
-let freeze () = (Lib.Interp.freeze (), Summary.Interp.freeze_summaries ())
+(* Opaque proofs are not in the summaries: roll their table back with the
+   environment (as Vernacstate.Interp does), or a handle gets reused. *)
+let freeze () =
+  (Lib.Interp.freeze (), Summary.Interp.freeze_summaries (), Opaques.Summary.freeze ())
 
-let unfreeze (lib, sum) =
+let unfreeze (lib, sum, opaques) =
   Lib.Interp.unfreeze lib;
-  Summary.Interp.unfreeze_summaries sum
+  Summary.Interp.unfreeze_summaries sum;
+  Opaques.Summary.unfreeze opaques
 
 (* Run a declaration at [line]; [None] when the import stops there. *)
 let declare state ch ~line ~raw ~name act =
