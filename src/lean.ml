@@ -81,6 +81,34 @@ let reorder_outside info ft =
   let hyps, out = Term.decompose_prod ft in
   fst (reorder_outside (List.rev info) (List.rev hyps) out)
 
+(* The eliminator of a primitive record with eta matches on its argument, so
+   reducing it forces a neutral argument to a constructor. Apply the branch to
+   the projections instead: convertible by eta, which is checked. *)
+let project_record_scheme env (mind, i) body =
+  let mib = Global.lookup_mind mind in
+  let packet = mib.mind_packets.(i) in
+  match packet.mind_record with
+  | Declarations.PrimRecord { has_eta = Declarations.NoEta; _ } -> body
+  | Declarations.PrimRecord _ -> (
+    (* params, motive, branch and the record *)
+    let binders, inside = Term.decompose_lambda_n_assum (mib.mind_nparams + 3) body in
+    match Constr.kind inside with
+    | Case (_, _, _, _, _, x, [| _ |]) when Constr.equal x (Constr.mkRel 1) ->
+      let fields =
+        List.init packet.mind_consnrealargs.(0) (fun proj_arg ->
+            let p, r = Declareops.inductive_make_projection (mind, i) mib ~proj_arg in
+            Constr.mkProj (Projection.make p false, r, x))
+      in
+      let projected =
+        Term.it_mkLambda_or_LetIn (Constr.mkApp (Constr.mkRel 2, Array.of_list fields)) binders
+      in
+      if Reductionops.is_conv env (Evd.from_env env) (EConstr.of_constr body)
+           (EConstr.of_constr projected)
+      then projected
+      else CErrors.user_err Pp.(str "Projection-based primitive-record scheme changed meaning")
+    | _ -> body)
+  | _ -> body
+
 (* Whether Rocq's scheme generator gives an argument of type [t] a recursive
    hypothesis: [mind] itself, or a container whose All scheme is registered. *)
 let rec has_rec_hyp env mind t =
@@ -232,7 +260,8 @@ let lean_scheme env ~dep (mind, ind_index) u s =
       recinfo
   in
 
-  if not hasrec then body
+  (* records are not recursive *)
+  if not hasrec then project_record_scheme env (mind, ind_index) body
   else
     (* body := fun params P (fc : forall args/recargs, P (C args)) => ...
 
