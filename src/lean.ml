@@ -423,6 +423,94 @@ let to_universe map u =
 let sets : Level.t Int.Map.t ref =
   Summary.ref ~name:"lean-set-surrogates" Int.Map.empty
 
+(* Lean terms are DAGs: a declaration translates each shared subterm once. A
+   subterm is found by physical identity and by the declarations, numbered up
+   to equality, of the part of the context its loose bound variables reach. *)
+module Cache = struct
+  let hash e = Hashtbl.hash_param 16 128 e
+
+  module Expr = Hashtbl.Make (struct
+    type t = LeanExpr.expr
+    let equal = ( == )
+    let hash = hash
+  end)
+
+  module Key = Hashtbl.Make (struct
+    type t = LeanExpr.expr * int * int list
+    let equal (e, n, c) (e', n', c') = e == e' && Int.equal n n' && List.equal Int.equal c c'
+    let hash (e, n, c) = Hashtbl.hash_param 16 128 (hash e, n, c)
+  end)
+
+  module Decl = Hashtbl.Make (struct
+    type t = Constr.rel_declaration
+    let equal d d' =
+      Sorts.relevance_equal (RelDecl.get_relevance d) (RelDecl.get_relevance d')
+      &&
+      match d, d' with
+      | RelDecl.LocalAssum (_, t), RelDecl.LocalAssum (_, t') -> Constr.equal t t'
+      | LocalDef (_, b, t), LocalDef (_, b', t') -> Constr.equal b b' && Constr.equal t t'
+      | _ -> false
+    let hash = function
+      | RelDecl.LocalAssum (a, t) -> Hashtbl.hash_param 4 16 (0, a.Context.binder_relevance, t)
+      | LocalDef (a, b, t) -> Hashtbl.hash_param 4 16 (1, a.Context.binder_relevance, b, t)
+  end)
+
+  type t = {
+    closed : Constr.t Expr.t;  (** subterms whose translation needs no context *)
+    terms : Constr.t Key.t;
+    context_free : bool Expr.t;
+    ranges : int Expr.t;
+    decls : int Decl.t;
+  }
+
+  let create () =
+    { closed = Expr.create 251; terms = Key.create 251; context_free = Expr.create 251;
+      ranges = Expr.create 251; decls = Decl.create 251 }
+
+  let memo table f e =
+    match Expr.find_opt table e with
+    | Some v -> v
+    | None -> let v = f e in Expr.add table e v; v
+
+  (* the number of [decl], whose context is numbered [parent] *)
+  let intern c parent decl =
+    let decl = RelDecl.map_constr (Vars.substl (List.map Constr.mkMeta parent)) decl in
+    match Decl.find_opt c.decls decl with
+    | Some k -> k
+    | None -> let k = Decl.length c.decls + 1 in Decl.add c.decls decl k; k
+
+  let context c env =
+    let rec decls k acc =
+      match Environ.lookup_rel_ctxt k env with
+      | d -> decls (k + 1) (d :: acc)
+      | exception Not_found -> acc
+    in
+    List.fold_left (fun parent d -> intern c parent d :: parent) [] (decls 1 [])
+
+  (* 1 + the largest loose bound variable, 0 for a closed term *)
+  let rec range c e =
+    let range = range c in
+    let under e = max 0 (range e - 1) in
+    memo c.ranges (function
+      | LeanExpr.Bound i -> i + 1
+      | Sort _ | Const _ | Nat _ | String _ -> 0
+      | App (f, x) -> max (range f) (range x)
+      | Let { ty; v; rest; _ } -> max (range ty) (max (range v) (under rest))
+      | Lam (_, _, ty, body) | Pi (_, _, ty, body) -> max (range ty) (under body)
+      | Proj (_, _, x) -> range x) e
+
+  (* applications with an ordinary head translate without the context;
+     [special] heads (projections, nested recursors) need it *)
+  let rec context_free c ~special e =
+    memo c.context_free (function
+      | LeanExpr.Bound _ | Sort _ | Const _ | Nat _ | String _ -> true
+      | App (f, x) as e ->
+        let rec head = function LeanExpr.App (f, _) -> head f | f -> f in
+        (match head e with Const (n, _) -> not (special n) | _ -> true)
+        && context_free c ~special f && context_free c ~special x
+      | Let _ | Lam _ | Pi _ | Proj _ -> false) e
+end
+
 type uconv = {
   map : extended_level N.Map.t;  (** Map from lean names to Coq universes *)
   levels : Level.t Universe.Map.t;
@@ -432,6 +520,7 @@ type uconv = {
       (** Lean levels occurring directly in an instance (not only under a
           successor or max): only they become parameters *)
   graph : UGraph.t;
+  cache : Cache.t;
 }
 
 let lean_id = Id.of_string "Lean"
@@ -722,6 +811,7 @@ let start_uconv univs i =
       map = N.Map.empty;
       levels = Universe.Map.empty;
       direct = Level.Set.empty;
+      cache = Cache.create ();
     }
   in
   let uconv, set1 = level_of_sets uconv 1 in
@@ -1765,7 +1855,23 @@ let declare_record_all_schemes n mind ind_name uctx projections =
           ~via:None
     | _ -> ()
 
-let rec to_constr =
+let rec to_constr env expr uconv = to_constr_in env (Cache.context uconv.cache env) expr uconv
+
+and to_constr_in env context expr uconv =
+  let c = uconv.cache in
+  let special n = N.Map.mem n !projection_aliases || Option.has_some (find_rec_info n) in
+  let translate () = to_constr_node env context expr uconv in
+  if Int.equal (Cache.range c expr) 0 || Cache.context_free c ~special expr then
+    match Cache.Expr.find_opt c.closed expr with
+    | Some t -> (uconv, t)
+    | None -> let uconv, t = translate () in Cache.Expr.add c.closed expr t; (uconv, t)
+  else
+    let key = (expr, List.length context, CList.firstn (Cache.range c expr) context) in
+    match Cache.Key.find_opt c.terms key with
+    | Some t -> (uconv, t)
+    | None -> let uconv, t = translate () in Cache.Key.add c.terms key t; (uconv, t)
+
+and to_constr_node =
   let open Constr in
   let ( >>= ) x f uconv =
     let uconv, x = x uconv in
@@ -1774,8 +1880,13 @@ let rec to_constr =
   let get_uconv uconv = (uconv, uconv) in
   let ret x uconv = (uconv, x) in
   let to_annot env n t u = (u, to_annot env n t u) in
-  let push_rel = Environ.push_rel_context_val in
-  fun env -> function
+  let under_binder env context decl expr uconv =
+    let context = Cache.intern uconv.cache context decl :: context in
+    to_constr_in (Environ.push_rel_context_val decl env) context expr uconv
+  in
+  fun env context expr ->
+    let translate expr = to_constr_in env context expr in
+    match expr with
     | Bound i -> ret (mkRel (i + 1))
     | Sort univ ->
       to_univ_level' univ >>= fun u -> ret (mkSort (sort_of_level u))
@@ -1786,7 +1897,7 @@ let rec to_constr =
         | f -> (f, args)
       in
       let f, args = spine [] e in
-      let to_args uconv = CList.fold_left_map (fun uconv x -> to_constr env x uconv) uconv args in
+      let to_args uconv = CList.fold_left_map (fun uconv x -> translate x uconv) uconv args in
       match (f, match f with Const (n, _) -> find_rec_info n | _ -> None) with
       | Const (n, univs), _ when N.Map.mem n !projection_aliases ->
         fun uconv ->
@@ -1823,28 +1934,28 @@ let rec to_constr =
           in
           (uconv, match adapted with Some t -> t | None -> plain ())
       | _ ->
-        to_constr env f >>= fun f ->
-        fun uconv ->
-          let uconv, args = to_args uconv in
-          (uconv, mkApp (f, Array.of_list args)))
+        (* one node at a time, so that shared partial applications are cached *)
+        let f, x = match e with App (f, x) -> (f, x) | _ -> assert false in
+        translate f >>= fun f ->
+        translate x >>= fun x -> ret (mkApp (f, [| x |])))
     | Let { name; ty; v; rest } ->
-      to_constr env ty >>= fun ty ->
+      translate ty >>= fun ty ->
       to_annot env name ty >>= fun name ->
-      to_constr env v >>= fun v ->
-      to_constr (push_rel (LocalDef (name, v, ty)) env) rest >>= fun rest ->
+      translate v >>= fun v ->
+      under_binder env context (LocalDef (name, v, ty)) rest >>= fun rest ->
       ret (mkLetIn (name, v, ty, rest))
     | Lam (_bk, n, a, b) ->
-      to_constr env a >>= fun a ->
+      translate a >>= fun a ->
       to_annot env n a >>= fun n ->
-      to_constr (push_rel (LocalAssum (n, a)) env) b >>= fun b ->
+      under_binder env context (LocalAssum (n, a)) b >>= fun b ->
       ret (mkLambda (n, a, b))
     | Pi (_bk, n, a, b) ->
-      to_constr env a >>= fun a ->
+      translate a >>= fun a ->
       to_annot env n a >>= fun n ->
-      to_constr (push_rel (LocalAssum (n, a)) env) b >>= fun b ->
+      under_binder env context (LocalAssum (n, a)) b >>= fun b ->
       ret (mkProd (n, a, b))
     | Proj (lean_ind, field, c) ->
-      to_constr env c >>= fun c ->
+      translate c >>= fun c ->
       get_uconv >>= fun uconv ->
       (* we retype to get the ind, because otherwise we need the lean
        univs for instantiation
