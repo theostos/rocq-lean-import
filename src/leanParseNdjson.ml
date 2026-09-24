@@ -18,6 +18,12 @@ let empty_state =
     seen_meta = false;
   }
 
+let of_state ~seen_meta (state : LeanParse.parsing_state) =
+  { names = state.names; exprs = state.exprs; univs = state.univs; seen_meta }
+
+let to_state state : LeanParse.parsing_state =
+  { names = state.names; exprs = state.exprs; univs = state.univs }
+
 let is_ndjson_line l =
   let l = String.trim l in
   String.length l > 0 && l.[0] = '{'
@@ -298,7 +304,7 @@ let parse_meta ~lcnt state json =
   if version <> "3.1.0" then err ~lcnt ("unsupported export format " ^ version);
   ({ state with seen_meta = true }, None)
 
-let parse_line ~prefix ~lcnt state l =
+let do_line ~lcnt state l =
   let l = String.trim l in
   if l = "" then (state, None)
   else
@@ -315,12 +321,9 @@ let parse_line ~prefix ~lcnt state l =
       parse_level ~lcnt state json
     else if has "ie" then parse_expr ~lcnt state json
     else
-      (* Declaration records; skipped (without parsing) while scanning a prefix
-         for the name/level/expr context that precedes the entry of interest. *)
       let declaration (k, parse) =
         match member k json with
-        | Some payload ->
-          Some (if prefix then (state, None) else parse ~lcnt state payload)
+        | Some payload -> Some (parse ~lcnt state payload)
         | None -> None
       in
       match
@@ -333,17 +336,4 @@ let parse_line ~prefix ~lcnt state l =
             ("inductive", parse_inductive) ]
       with
       | Some result -> result
-      | None ->
-        if prefix then (state, None) else err ~lcnt "unsupported NDJSON record"
-
-let do_prefix_line ~lcnt state l =
-  fst (parse_line ~prefix:true ~lcnt state l)
-
-let do_line ~lcnt state l =
-  parse_line ~prefix:false ~lcnt state l
-
-let pp_state state =
-  let open Pp in
-  str "- " ++ int (RRange.length state.univs) ++ str " universe expressions" ++ fnl () ++
-  str "- " ++ int (RRange.length state.names) ++ str " names" ++ fnl () ++
-  str "- " ++ int (RRange.length state.exprs) ++ str " expression nodes" ++ fnl ()
+      | None -> err ~lcnt "unsupported NDJSON record"

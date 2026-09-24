@@ -1,4 +1,8 @@
-type parsing_state
+type parsing_state = {
+  names : LeanName.t LeanParseShared.RRange.t;
+  exprs : LeanExpr.expr LeanParseShared.RRange.t;
+  univs : LeanExpr.U.t LeanParseShared.RRange.t;
+}
 
 val empty_state : parsing_state
 
