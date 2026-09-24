@@ -250,7 +250,7 @@ let parse_thm ~lcnt state payload =
   forbid_member ~lcnt "isUnsafe" payload;
   forbid_member ~lcnt "safety" payload;
   validate_mutual_group ~lcnt state payload;
-  parse_deflike_common ~hint:OpaqueHint ~kernel_opaque:true ~lcnt state payload
+  parse_deflike_common ~hint:OpaqueHint ~kernel_opaque:false ~lcnt state payload
 
 let parse_opaque ~lcnt state payload =
   ignore (require_bool ~lcnt "isUnsafe" payload);

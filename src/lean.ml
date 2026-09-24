@@ -538,6 +538,17 @@ let to_univ_level u uconv =
 
 let height_cache = Summary.ref ~name:"lean-heights" N.Map.empty
 
+(* Definitions that only wrap the eliminator of a primitive record, which does
+   not force its argument: the conversion oracle unfolds them first. *)
+let expand_head_cache = Summary.ref ~name:"lean-expand-heads" N.Set.empty
+
+let rec expands_at_head = function
+  | Const (c, _) -> N.Set.mem c !expand_head_cache
+  | App (f, _) -> expands_at_head f
+  | Lam (_, _, _, body) -> expands_at_head body
+  | Let { rest; _ } -> expands_at_head rest
+  | Bound _ | Sort _ | Pi _ | Proj _ | Nat _ | String _ -> false
+
 let rec height = function
   | Const (c, _) ->
     (try N.Map.find c !height_cache + 1
@@ -2027,17 +2038,28 @@ and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
   in
   let () =
     let c = match inst.ref with ConstRef c -> c | _ -> assert false in
-    if not kernel_opaque then begin
-      let strategy = match hint with
-        | LegacyHint -> Conv_oracle.Level (-(height n body))
-        | AbbrevHint -> Conv_oracle.Expand
-        | OpaqueHint -> Conv_oracle.Level 1
-        | RegularHint h ->
-          height_cache := N.Map.add n h !height_cache;
-          Conv_oracle.Level (-h)
-      in
-      Redexpr.set_strategy false [ (strategy, [ Evaluable.EvalConstRef c ]) ]
-    end
+    (* a projection alias also sets the strategy of the primitive projection *)
+    let evaluables =
+      Evaluable.EvalConstRef c
+      :: (match Structures.PrimitiveProjections.find_opt c with
+         | Some p -> [ Evaluable.EvalProjectionRef p ]
+         | None -> [])
+    in
+    let strategy level = Redexpr.set_strategy false [ (level, evaluables) ] in
+    if not kernel_opaque then
+      match hint with
+      | OpaqueHint -> strategy (Conv_oracle.Level 1)
+      | AbbrevHint -> strategy Conv_oracle.Expand
+      | (LegacyHint | RegularHint _) when expands_at_head body ->
+        (match hint with
+        | RegularHint h -> height_cache := N.Map.add n h !height_cache
+        | _ -> ());
+        strategy Conv_oracle.Expand;
+        expand_head_cache := N.Set.add n !expand_head_cache
+      | LegacyHint | RegularHint _ ->
+        let h = match hint with RegularHint h -> h | _ -> height n body in
+        height_cache := N.Map.add n h !height_cache;
+        strategy (Conv_oracle.Level (-h))
   in
   let () = add_declared n i inst in
   inst
@@ -2469,6 +2491,12 @@ and declare_schemes ~i ~univs ~algs mind k (n, ind_name, _, squashy) =
       else if sort == SchemeType then 2 * i
       else (2 * i) + 1
     in
+    (* the eliminator of a primitive record only applies its branch to projections *)
+    (match ((Global.lookup_mind mind).mind_packets.(k).mind_record, elim.ref) with
+    | Declarations.PrimRecord _, GlobRef.ConstRef c ->
+      Redexpr.set_strategy false [ (Conv_oracle.Expand, [ Evaluable.EvalConstRef c ]) ];
+      expand_head_cache := N.Set.add nrec !expand_head_cache
+    | _ -> ());
     add_declared nrec j elim
   in
   List.iter
@@ -2929,6 +2957,7 @@ module Checkpoint = struct
     mutual_entries : C.saved_ind list N.Map.t;
     squash_info : squashy N.Map.t;
     heights : int N.Map.t;
+    expand_heads : N.Set.t;
     aliases : projection_alias Int.Map.t N.Map.t;
     recs : rec_info N.Map.t;
   }
@@ -2936,7 +2965,7 @@ module Checkpoint = struct
   type packed = { format : int; digest : string; blob : string }
 
   (* Version of the [saved] layout. *)
-  let format = 5
+  let format = 6
 
   let save () =
     let parser, (entries, mutual_entries) =
@@ -2945,7 +2974,8 @@ module Checkpoint = struct
         N.Map.map (List.map (C.save_ind save)) !mutual_entries)
     in
     { parser; sets = !sets; declared = !declared; entries; mutual_entries;
-      squash_info = !squash_info; heights = !height_cache; aliases = !projection_aliases;
+      squash_info = !squash_info; heights = !height_cache;
+      expand_heads = !expand_head_cache; aliases = !projection_aliases;
       recs = !rec_info }
 
   let restore saved =
@@ -2964,6 +2994,7 @@ module Checkpoint = struct
         !entries N.Map.empty;
     squash_info := saved.squash_info;
     height_cache := saved.heights;
+    expand_head_cache := saved.expand_heads;
     projection_aliases := saved.aliases;
     rec_info := saved.recs
 
