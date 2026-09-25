@@ -10,3 +10,8 @@
 
 val import : from:int option -> until:int option -> string -> unit
 (** [from] is inclusive (lines start at 1), [until] is exclusive *)
+
+(** Survey mode commands: see [Lean.Survey] *)
+val survey_restore : unit -> unit
+val survey_report : string -> unit
+val survey_recheck : string -> int -> string -> unit

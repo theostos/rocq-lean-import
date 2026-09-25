@@ -18,3 +18,9 @@ let init () = ()
 VERNAC COMMAND EXTEND LeanImport CLASSIFIED AS SIDEFF
 | [ "Lean" "Import" string(f) int_opt(from) int_opt(until) ] -> { Lean.import f ~from ~until }
 END
+
+VERNAC COMMAND EXTEND LeanSurvey CLASSIFIED AS SIDEFF
+| [ "Lean" "Survey" "Restore" ] -> { Lean.survey_restore () }
+| [ "Lean" "Survey" "Report" string(f) ] -> { Lean.survey_report f }
+| [ "Lean" "Survey" "Recheck" string(n) int(i) string(f) ] -> { Lean.survey_recheck n i f }
+END

@@ -1093,7 +1093,56 @@ let remap_mutual_ctor ~nparams ~names own =
   in
   remap 0
 
+(* Survey mode explores an export: a theorem whose proof exceeds the line
+   timeout is admitted and recorded, so the result is not a checked import. *)
+module Survey = struct
+  let { Goptions.get = mode } =
+    Goptions.declare_bool_option_and_ref ~key:[ "Lean"; "Survey" ] ~value:false ()
+
+  type item = { line : int; kind : string; admitted : bool; instances : int list }
+
+  (* the timed-out declarations, and the line where each name was declared *)
+  let items : item N.Map.t ref = Summary.ref ~name:"lean-survey-items" N.Map.empty
+  let origins : int N.Map.t ref = Summary.ref ~name:"lean-survey-origins" N.Map.empty
+  let line = ref 0
+
+  (* while rechecking [target] of line [l]: names it may not use *)
+  let recheck = ref None
+
+  let json n item =
+    `Assoc
+      [ ("name", `String (N.to_lean_string n)); ("line", `Int item.line);
+        ("kind", `String item.kind); ("admitted", `Bool item.admitted);
+        ("instances", `List (List.map (fun i -> `Int i) (List.sort_uniq compare item.instances))) ]
+
+  let event kind n item =
+    let data = `Assoc [ ("event", `String kind); ("target", json n item) ] in
+    Printf.eprintf "[lean survey] %s\n%!" (Yojson.Basic.to_string data)
+
+  let add_origin n =
+    if mode () && not (N.Map.mem n !origins) then origins := N.Map.add n !line !origins
+
+  let admitted n = match N.Map.find_opt n !items with Some item -> item.admitted | None -> false
+
+  let note_instance n i =
+    match N.Map.find_opt n !items with
+    | Some item when not (List.mem i item.instances) ->
+      let item = { item with instances = i :: item.instances } in
+      items := N.Map.add n item !items;
+      event "instance" n item
+    | _ -> ()
+
+  let guard n =
+    match !recheck with
+    | Some (target, l)
+      when N.equal target n
+           || (match N.Map.find_opt n !origins with Some o -> o >= l | None -> false) ->
+      CErrors.user_err Pp.(str "Survey recheck forbids self/future reference: " ++ N.pp n)
+    | _ -> ()
+end
+
 let add_declared n i inst =
+  Survey.add_origin n;
   declared :=
     N.Map.update n
       (function
@@ -2073,6 +2122,7 @@ and instantiate n univs uconv =
   (uconv, Constr.mkRef (inst.ref, u))
 
 and ensure_exists n i =
+  Survey.guard n;
   try !declared |> N.Map.find n |> Int.Map.find i
   with Not_found ->
     (match N.Map.find_opt n !constructor_owners with
@@ -2093,6 +2143,8 @@ and ensure_exists n i =
         | exception Not_found -> CErrors.user_err Pp.(str "missing " ++ N.pp n))))
 
 and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
+  Survey.note_instance n i;
+  if Survey.admitted n then declare_ax { name = n; ty; univs } i else
   let predeclared = get_predeclared_def_some n i in
   let ref, algs =
     match predeclared with
@@ -2171,6 +2223,11 @@ and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
 and declare_ax { name = n; ty; univs } i =
   let uconv = start_uconv univs i in
   let uconv, ty = to_constr empty_env ty uconv in
+  if Survey.admitted n then begin
+    let env = Environ.set_universes uconv.graph (Global.env ()) in
+    if not (Sorts.is_sprop (Typeops.infer_type env ty).utj_type) then
+      CErrors.user_err Pp.(str "Only theorem statements in SProp may be survey-admitted")
+  end;
   let univs, algs = univ_entry uconv univs in
   let entry = Declare.(ParameterEntry (parameter_entry ~univs ty)) in
   let c =
@@ -2785,6 +2842,8 @@ let declare_def def =
 let declare_ax ax =
   declare_instances (fun i -> ignore (declare_ax ax i)) ax.univs
 
+let declare_ind_instance = declare_ind
+
 let declare_ind inds =
   let () = squashify inds in
   declare_instances (fun i -> ignore (declare_ind inds i)) (List.hd inds).univs
@@ -2935,12 +2994,44 @@ let unfreeze (lib, sum, opaques) =
   Summary.Interp.unfreeze_summaries sum;
   Opaques.Summary.unfreeze opaques
 
+(* In survey mode, after a timeout: a theorem is admitted (its statement and
+   the new instances of its dependencies are still checked), anything else is
+   retried once with a larger bounded budget. *)
+let survey_recover ?entry ch ~line ~raw ~name st act =
+  let kind =
+    match Yojson.Basic.from_string raw with
+    | `Assoc [ (kind, _) ] -> kind
+    | _ -> "inductive-group"
+    | exception _ -> "inductive-group"
+  in
+  let item = { Survey.line; kind; admitted = kind = "thm"; instances = [ 0 ] } in
+  Survey.items := N.Map.add name item !Survey.items;
+  Survey.event "timeout" name item;
+  let recover () =
+    match entry with
+    | Some (Def def) when item.admitted ->
+      declare_def def;
+      entries := N.Map.add name (Def def) !entries
+    | _ -> act ()
+  in
+  match Control.timeout 1800. recover () with
+  | Ok () ->
+    Survey.origins := N.Map.add name line !Survey.origins;
+    Survey.event (if item.admitted then "admitted" else "retry-passed") name item
+  | Error _ ->
+    unfreeze st;
+    close_in ch;
+    CErrors.user_err Pp.(str "Survey recovery timed out for " ++ N.pp name)
+
 (* Run a declaration at [line]; [None] when the import stops there. *)
-let declare state ch ~line ~raw ~name act =
+let declare ?entry state ch ~line ~raw ~name act =
   (* freeze is actually pretty costly, so make sure we don't run it for non sideffect lines. *)
   let st = freeze () in
+  Survey.line := line;
   match with_line_timeout act with
-  | () -> Some state
+  | () ->
+    if Survey.mode () then Survey.origins := N.Map.add name line !Survey.origins;
+    Some state
   | exception e ->
     let e = Exninfo.capture e in
     let epp =
@@ -2951,6 +3042,11 @@ let declare state ch ~line ~raw ~name act =
     (* without this unfreeze, the global state.declared and the
        global env are out of sync *)
     unfreeze st;
+    if Survey.mode () && fst e = TimedOut then begin
+      survey_recover ?entry ch ~line ~raw ~name st act;
+      Some state
+    end
+    else
     match error_mode (fst e) with
     | Skip ->
       Feedback.msg_info Pp.(str "Skipping: " ++ epp);
@@ -3017,7 +3113,7 @@ let rec do_input parse state ~from ~until ~pending ch =
             | true, _ | false, None -> Some state
             | false, Some (Nota _) -> Some state (* notations not yet implemented *)
             | false, Some (Entry entry) ->
-              declare state ch ~line:!lcnt ~raw ~name:(entry_name entry) (fun () ->
+              declare ~entry state ch ~line:!lcnt ~raw ~name:(entry_name entry) (fun () ->
                   add_entry entry)
             | false, Some (MutualInd inds) ->
               declare state ch ~line:!lcnt ~raw ~name:(List.hd inds).name (fun () ->
@@ -3150,7 +3246,21 @@ module Checkpoint = struct
       restore saved
 
   let add_leaf () = Lib.add_leaf (obj (pack ()))
+  let pending_state () = Option.has_some !pending
 end
+
+let survey_obj =
+  let open Libobject in
+  declare_object
+    {
+      (default_object "LEAN-IMPORT-SURVEY") with
+      cache_function = (fun _ -> ());
+      load_function =
+        (fun _ (items, origins) ->
+          Survey.items := items;
+          Survey.origins := origins);
+      classify_function = (fun _ -> Keep);
+    }
 
 (* Unit-like registrations are not kept by checkpoints: redo them. *)
 let register_unit_like () =
@@ -3166,7 +3276,13 @@ let register_unit_like () =
     !declared
 
 let import ~from ~until f =
+  if Survey.mode () && (error_mode TimedOut <> Fail || just_parse () || lazy_instances ()
+                        || skip_missing_quot ()) then
+    CErrors.user_err
+      Pp.(str "Survey requires Fail mode, proof checking and no missing-quotient skips");
   Checkpoint.force ();
+  if not (Survey.mode ()) && not (N.Map.is_empty !Survey.items) then
+    CErrors.user_err Pp.(str "A survey checkpoint cannot enter a checked import");
   lcnt := 1;
   register_unit_like ();
   (* silence the definition messages from Coq *)
@@ -3175,4 +3291,92 @@ let import ~from ~until f =
         do_input { pstate = !pstate; skips = 0 } ~from ~until (open_in f)) ()
   in
   pstate := pstatev;
-  Checkpoint.add_leaf ()
+  Checkpoint.add_leaf ();
+  if Survey.mode () then Lib.add_leaf (survey_obj (!Survey.items, !Survey.origins))
+
+let survey_restored = ref false
+
+(* Load the checkpoint without importing, for the survey commands below. *)
+let survey_restore () =
+  if Checkpoint.pending_state () || not !survey_restored then begin
+    Checkpoint.force ();
+    register_unit_like ();
+    survey_restored := true
+  end
+
+let survey_instances n item =
+  let declared = Option.cata Int.Map.bindings [] (N.Map.find_opt n !declared) in
+  List.sort_uniq compare (List.map fst declared @ item.Survey.instances)
+
+let survey_report file =
+  survey_restore ();
+  let targets =
+    List.map
+      (fun (n, item) -> Survey.json n { item with instances = survey_instances n item })
+      (N.Map.bindings !Survey.items)
+  in
+  let ch = open_out file in
+  Yojson.Basic.to_channel ch (`Assoc [ ("format", `Int 1); ("targets", `List targets) ]);
+  output_char ch '\n';
+  close_out ch
+
+(* Check the original declaration of a survey target again, at instance [i] (all
+   known instances if [i < 0]), and append one JSON line per instance to [file].
+   Other admitted theorems remain assumptions. *)
+let survey_recheck name i file =
+  survey_restore ();
+  let n, item =
+    match List.find_opt (fun (n, _) -> String.equal name (N.to_lean_string n))
+            (N.Map.bindings !Survey.items) with
+    | Some x -> x
+    | None -> CErrors.user_err Pp.(str "Unknown survey target: " ++ str name)
+  in
+  let entry = N.Map.find n !entries in
+  let univs =
+    match entry with Def d -> d.univs | Ind d -> d.univs | Ax d -> d.univs | Quot _ -> []
+  in
+  let instances = if i < 0 then List.sort_uniq compare (0 :: survey_instances n item) else [ i ] in
+  if List.exists (fun i -> i < 0 || i >= 1 lsl List.length univs) instances then
+    CErrors.user_err Pp.(str "Invalid survey universe instance");
+  let check i () =
+    match entry with
+    | Def def ->
+      (* a new constant for the original body: never the admitted one *)
+      let uconv = start_uconv def.univs i in
+      let uconv, ty = to_constr empty_env def.ty uconv in
+      let uconv, body = to_constr empty_env def.body uconv in
+      let univs, _ = univ_entry uconv def.univs in
+      ignore (quickdef ~opaque:false ~name:(name_for n i) ~types:(Some ty) ~univs body)
+    | Ind ind ->
+      Survey.recheck := None;
+      let inds = Option.default [ ind ] (N.Map.find_opt n !mutual_entries) in
+      ignore (declare_ind_instance inds i)
+    | Ax _ | Quot _ -> CErrors.user_err Pp.(str "Unsupported survey recheck entry")
+  in
+  let ch = open_out_gen [ Open_creat; Open_append; Open_text ] 0o644 file in
+  let recheck i =
+    let st = freeze () in
+    let wall = Unix.gettimeofday () and cpu = Sys.time () in
+    let status, message =
+      Fun.protect
+        ~finally:(fun () -> Survey.recheck := None; unfreeze st)
+        (fun () ->
+          Survey.recheck := Some (n, item.line);
+          match with_line_timeout (check i) with
+          | () -> ("passed", "")
+          | exception TimedOut -> ("timeout", "")
+          | exception e when CErrors.noncritical e ->
+            ("failed", Pp.string_of_ppcmds (CErrors.print e)))
+    in
+    let row =
+      `Assoc
+        [ ("name", `String name); ("line", `Int item.line); ("instance", `Int i);
+          ("status", `String status); ("message", `String message);
+          ("wall_seconds", `Float (Unix.gettimeofday () -. wall));
+          ("cpu_seconds", `Float (Sys.time () -. cpu)) ]
+    in
+    Yojson.Basic.to_channel ch row;
+    output_char ch '\n';
+    flush ch
+  in
+  Fun.protect ~finally:(fun () -> close_out ch) (fun () -> List.iter recheck instances)
