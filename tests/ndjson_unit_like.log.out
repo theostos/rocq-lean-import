@@ -1,0 +1,22 @@
+line 24: True
+line 47: Proofy
+line 47: Proofy.(field).h
+line 97: Eq
+Eq is predeclared
+line 103: Proofy.h
+line 116: rfl
+line 130: Proofy.eta
+line 143: U
+line 180: Nat
+Nat is predeclared
+line 196: U.elim
+line 207: U.elim_any
+
+
+Done!
+- 10 entries (12 possible instances).
+- 4 universe expressions
+- 48 names
+- 146 expression nodes
+Max universe instance length 1.
+0 inductives have non syntactically arity types.

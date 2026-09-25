@@ -84,6 +84,26 @@ let reorder_outside info ft =
 (* The eliminator of a primitive record with eta matches on its argument, so
    reducing it forces a neutral argument to a constructor. Apply the branch to
    the projections instead: convertible by eta, which is checked. *)
+(* Lean's eliminator of a unit-like type with a nullary constructor returns its
+   branch even on a neutral argument. So does [fun params P f x => f] by the
+   kernel's unit-like eta, which is checked. *)
+let unit_scheme env ind body =
+  let mib, packet = Inductive.lookup_mind_specif env ind in
+  let unit_like = (Environ.retroknowledge env).Retroknowledge.retro_unit_like in
+  if List.exists (Ind.UserOrd.equal ind) unit_like
+     && packet.mind_nrealargs = 0 && packet.mind_consnrealdecls = [| 0 |]
+  then
+    let binders, inside = Term.decompose_lambda_n_assum (mib.mind_nparams + 3) body in
+    match Constr.kind inside with
+    | Case (_, _, _, _, _, x, [| ([||], b) |])
+      when Constr.equal x (Constr.mkRel 1) && Constr.equal b (Constr.mkRel 2) ->
+      let branch = Term.it_mkLambda_or_LetIn (Constr.mkRel 2) binders in
+      let ty = (Typeops.infer env body).uj_type in
+      ignore (Typeops.infer env (Constr.mkCast (branch, DEFAULTcast, ty)));
+      branch
+    | _ -> body
+  else body
+
 let project_record_scheme env (mind, i) body =
   let mib = Global.lookup_mind mind in
   let packet = mib.mind_packets.(i) in
@@ -261,7 +281,8 @@ let lean_scheme env ~dep (mind, ind_index) u s =
   in
 
   (* records are not recursive *)
-  if not hasrec then project_record_scheme env (mind, ind_index) body
+  if not hasrec then
+    unit_scheme env (mind, ind_index) (project_record_scheme env (mind, ind_index) body)
   else
     (* body := fun params P (fc : forall args/recargs, P (C args)) => ...
 
@@ -2234,15 +2255,8 @@ and declare_ind inds i =
                  match (fields, Sorts.is_sprop sort, is_recursive) with
                  | [], true, _ -> (None, [], ctys)
                  | _ :: _, false, false ->
-                   (* Proof-only Type records need ordinary induction: they have no primitive eta. *)
-                   if
-                     List.exists
-                       (fun (na, _) ->
-                         na.Context.binder_relevance
-                         == EConstr.ERelevance.relevant)
-                       fields
-                   then (Some (Some [| default_proj_id |]), fields, [ cty' ])
-                   else (None, [], ctys)
+                   (* with only proof fields, Rocq gives it no eta but it is unit-like *)
+                   (Some (Some [| default_proj_id |]), fields, [ cty' ])
                  | [], false, _ -> (None, [], ctys)
                  | _ :: _, true, false ->
                    if
@@ -2355,6 +2369,8 @@ and declare_ind inds i =
         cnames)
     packets;
 
+  (* the kernel checks that it is unit-like *)
+  (try Global.register_unit_like (mind, 0) with CErrors.UserError _ -> ());
   List.iteri (declare_schemes ~i ~univs ~algs mind) packets;
   (* Lean has more recursors than the block's for a block or a nested inductive *)
   let nested =
@@ -2995,9 +3011,23 @@ module Checkpoint = struct
   let add_leaf () = Lib.add_leaf (obj (pack ()))
 end
 
+(* Unit-like registrations are not kept by checkpoints: redo them. *)
+let register_unit_like () =
+  N.Map.iter
+    (fun _ insts ->
+      Int.Map.iter
+        (fun _ { ref; _ } ->
+          match ref with
+          | GlobRef.IndRef ind -> (
+            try Global.register_unit_like ind with CErrors.UserError _ -> ())
+          | _ -> ())
+        insts)
+    !declared
+
 let import ~from ~until f =
   Checkpoint.force ();
   lcnt := 1;
+  register_unit_like ();
   (* silence the definition messages from Coq *)
   let { pstate = pstatev } =
     Flags.silently (fun () ->
