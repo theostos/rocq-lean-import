@@ -22,6 +22,7 @@ ndjson_ulift.v
 ndjson_mutual.v
 ndjson_nested.v
 ndjson_nested_containers.v
+ndjson_records.v
 ndjson_core.v
 ndjson_init.v
 ndjson_stdlib.v

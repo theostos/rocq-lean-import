@@ -1,0 +1,26 @@
+line 56: Pair
+line 56: Pair.(field).snd
+line 56: Pair.(field).fst
+line 66: Pair.snd
+line 75: Pair.fst
+line 97: Pair.swap
+line 102: Pair.first
+line 140: Nat
+Nat is predeclared
+line 188: Eq
+Eq is predeclared
+line 201: rfl
+line 223: Pair.first_mk
+line 247: Pair.elim
+line 261: Pair.elim_fst
+line 267: Pair.diag
+line 279: Pair.diag_fst
+
+
+Done!
+- 13 entries (15 possible instances).
+- 4 universe expressions
+- 51 names
+- 212 expression nodes
+Max universe instance length 1.
+0 inductives have non syntactically arity types.
