@@ -1,0 +1,113 @@
+line 51: Nat
+Nat is predeclared
+line 116: List
+line 142: Array
+line 142: Array.(field).toList
+line 407: Tagged
+line 407: Array_inst1.(field).toList0
+line 460: SOrL
+line 935: Embed
+File "./ndjson_nested_containers.v", line 3, characters 0-88:
+Warning: Embed is nested using Tagged. No scheme for Tagged is registered as
+All. It can be generated using command "Scheme All" e.g. "Scheme All for
+Tagged.". [register-all,automation,default]
+File "./ndjson_nested_containers.v", line 3, characters 0-88:
+Warning: Embed is nested using Tagged. No scheme for Tagged is registered as
+All. It can be generated using command "Scheme All" e.g. "Scheme All for
+Tagged.". [register-all,automation,default]
+line 975: Eq
+Eq is predeclared
+line 999: plus
+line 1064: Embed.count
+line 1083: Embed.countT
+line 1096: rfl
+line 1118: Embed.count_trace
+line 1152: Embed.rec.eta
+line 1186: Embed.rec_1.eta
+line 1220: Embed.rec_2.eta
+line 1238: Embed.rec_3.eta
+line 1256: Embed.rec_4.eta
+line 1299: Prod
+line 1299: Prod.(field).snd
+line 1299: Prod.(field).fst
+line 1438: LPTree
+line 1438: Prod_inst3.(field).snd0
+line 1438: Prod_inst3.(field).fst0
+line 1438: LPTree.(field).a____at____internal__hyg0
+line 1456: LPTree.rec.eta
+line 1466: LPTree.rec_1.eta
+line 1484: LPTree.rec_2.eta
+line 1533: MyList
+line 2854: MTree
+File "./ndjson_nested_containers.v", line 3, characters 0-88:
+Warning: MTree is nested using Tagged. No scheme for Tagged is registered as
+All. It can be generated using command "Scheme All" e.g. "Scheme All for
+Tagged.". [register-all,automation,default]
+File "./ndjson_nested_containers.v", line 3, characters 0-88:
+Warning: MTree is nested using MyList. No scheme for MyList is registered as
+All. It can be generated using command "Scheme All" e.g. "Scheme All for
+MyList.". [register-all,automation,default]
+File "./ndjson_nested_containers.v", line 3, characters 0-88:
+Warning: MTree is nested using Tagged. No scheme for Tagged is registered as
+All. It can be generated using command "Scheme All" e.g. "Scheme All for
+Tagged.". [register-all,automation,default]
+File "./ndjson_nested_containers.v", line 3, characters 0-88:
+Warning: MTree is nested using MyList. No scheme for MyList is registered as
+All. It can be generated using command "Scheme All" e.g. "Scheme All for
+MyList.". [register-all,automation,default]
+line 2912: MTree.rec.eta
+line 2942: MTree.rec_1.eta
+line 2972: MTree.rec_2.eta
+line 3030: MTree.rec_3.eta
+line 3060: MTree.rec_4.eta
+line 3118: MTree.rec_5.eta
+line 3148: MTree.rec_6.eta
+line 3178: MTree.rec_7.eta
+line 3209: Two
+line 3209: Two.(field).b
+line 3209: Two.(field).a
+line 3381: TwoTree
+File "./ndjson_nested_containers.v", line 3, characters 0-88:
+Warning: TwoTree is nested using Two. No scheme for Two is registered as All.
+It can be generated using command "Scheme All" e.g. "Scheme All for Two.".
+[register-all,automation,default]
+File "./ndjson_nested_containers.v", line 3, characters 0-88:
+Warning: TwoTree is nested using Two. No scheme for Two is registered as All.
+It can be generated using command "Scheme All" e.g. "Scheme All for Two.".
+[register-all,automation,default]
+line 3401: TwoTree.rec.eta
+line 3412: TwoTree.rec_1.eta
+line 3423: TwoTree.rec_2.eta
+line 3988: NA
+line 3988: NB
+File "./ndjson_nested_containers.v", line 3, characters 0-88:
+Warning: NA is nested using Tagged. No scheme for Tagged is registered as
+All. It can be generated using command "Scheme All" e.g. "Scheme All for
+Tagged.". [register-all,automation,default]
+File "./ndjson_nested_containers.v", line 3, characters 0-88:
+Warning: NA is nested using Tagged. No scheme for Tagged is registered as
+All. It can be generated using command "Scheme All" e.g. "Scheme All for
+Tagged.". [register-all,automation,default]
+File "./ndjson_nested_containers.v", line 3, characters 0-88:
+Warning: NA is nested using Tagged. No scheme for Tagged is registered as
+All. It can be generated using command "Scheme All" e.g. "Scheme All for
+Tagged.". [register-all,automation,default]
+File "./ndjson_nested_containers.v", line 3, characters 0-88:
+Warning: NA is nested using Tagged. No scheme for Tagged is registered as
+All. It can be generated using command "Scheme All" e.g. "Scheme All for
+Tagged.". [register-all,automation,default]
+line 4026: NA.rec.eta
+line 4046: NA.rec_1.eta
+line 4066: NA.rec_2.eta
+line 4086: NA.rec_3.eta
+line 4106: NA.rec_4.eta
+line 4144: NB.rec.eta
+
+
+Done!
+- 45 entries (77 possible instances).
+- 8 universe expressions
+- 193 names
+- 3900 expression nodes
+Max universe instance length 2.
+0 inductives have non syntactically arity types.

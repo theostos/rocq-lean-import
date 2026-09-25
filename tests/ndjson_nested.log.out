@@ -1,0 +1,62 @@
+line 75: List
+line 103: Array
+line 103: Array.(field).toList
+line 264: ATree
+line 264: Array_inst1.(field).toList0
+line 264: ATree.(field).a____at____internal__hyg0
+line 300: Nat
+Nat is predeclared
+line 324: plus
+line 360: ATree.size
+line 400: Eq
+Eq is predeclared
+line 411: ATree.sizes
+line 424: rfl
+line 443: ATree.size_node
+line 522: LTree
+line 522: LTree.(field).a____at____internal__hyg0
+line 544: LTree.size
+line 553: LTree.sizes
+line 566: LTree.size_node
+line 572: LTree.two
+line 581: LTree.size_two
+line 737: MA
+line 737: MB
+line 766: MA.size
+line 778: MB.sizes
+line 791: MA.size_node
+line 829: Option
+line 900: OTree
+line 900: OTree.(field).a____at____internal__hyg0
+line 920: OTree.size
+line 933: OTree.size_some
+line 977: Prod
+line 977: Prod.(field).snd
+line 977: Prod.(field).fst
+line 1053: PTree
+line 1053: Prod_inst3.(field).snd0
+line 1053: Prod_inst3.(field).fst0
+line 1077: PTree.size
+line 1094: PTree.size_node
+line 1192: TA
+line 1192: TB
+line 1223: TA.count
+line 1242: TA.count_node
+line 1269: Wrap
+line 1269: Wrap.(field).val
+line 1269: Wrap.(field).n
+line 1277: Wrap.n
+line 1284: Wrap.val
+line 1341: WTree
+line 1341: WTree.(field).a____at____internal__hyg0
+line 1361: WTree.size
+line 1378: WTree.size_node
+
+
+Done!
+- 39 entries (47 possible instances).
+- 8 universe expressions
+- 203 names
+- 1131 expression nodes
+Max universe instance length 2.
+0 inductives have non syntactically arity types.
