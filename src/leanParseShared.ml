@@ -2,7 +2,7 @@ open LeanExpr
 module N = LeanName
 
 module RRange : sig
-  type +'a t
+  type 'a t
   (** Like Range.t, but instead of cons we append *)
 
   val empty : 'a t
@@ -11,16 +11,37 @@ module RRange : sig
   val get : 'a t -> int -> 'a
   val singleton : 'a -> 'a t
 end = struct
-  type 'a t = { data : 'a Range.t; len : int }
+  type 'a t = {
+    chunks : 'a array Range.t;
+    tail : 'a Range.t;
+    len : int;
+  }
 
-  let empty = { data = Range.empty; len = 0 }
+  (* Elements are packed into arrays of [chunk_size] once appended, so the
+     tree only holds one node per chunk plus the unfinished tail. *)
+  let chunk_size = 256
+  let empty = { chunks = Range.empty; tail = Range.empty; len = 0 }
   let length x = x.len
-  let append { data; len } x = { data = Range.cons x data; len = len + 1 }
 
-  let get { data; len } i =
-    if i >= len then raise Not_found else Range.get data (len - i - 1)
+  let append { chunks; tail; len } x =
+    let tail = Range.cons x tail in
+    let len = len + 1 in
+    if len mod chunk_size <> 0 then { chunks; tail; len }
+    else
+      let chunk =
+        Array.init chunk_size (fun i -> Range.get tail (chunk_size - i - 1))
+      in
+      { chunks = Range.cons chunk chunks; tail = Range.empty; len }
 
-  let singleton x = { data = Range.cons x Range.empty; len = 1 }
+  let get { chunks; tail; len } i =
+    if i < 0 || i >= len then raise Not_found;
+    let full_chunks = len / chunk_size in
+    if i / chunk_size = full_chunks then Range.get tail (len - i - 1)
+    else
+      let chunk = Range.get chunks (full_chunks - i / chunk_size - 1) in
+      chunk.(i mod chunk_size)
+
+  let singleton x = append empty x
 end
 
 (** Replace [n] (meant to be an the inductive type appearing in the constructor

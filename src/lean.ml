@@ -2065,32 +2065,95 @@ let rec do_input state ~from ~until ch =
 
 let pstate = Summary.ref ~name:"lean-parse-state" LeanParse.empty_state
 
-let lean_obj =
-  let cache (pstatev, setsv, declaredv, entriesv, squash_infov, heightv) =
-    pstate := pstatev;
-    sets := setsv;
-    declared := declaredv;
-    entries := entriesv;
+(* The importer state is kept in a library object as one marshalled string, with
+   the expression index encoded by [LeanParse.Checkpoint], and is unpacked at
+   the next [Lean Import] rather than when the library is loaded. *)
+module Checkpoint = struct
+  module C = LeanParse.Checkpoint
+
+  type saved = {
+    parser : C.t;
+    sets : Level.t Int.Map.t;
+    declared : instantiation Int.Map.t N.Map.t;
+    entries : C.saved_entry N.Map.t;
+    squash_info : squashy N.Map.t;
+    heights : int N.Map.t;
+  }
+
+  type packed = { format : int; digest : string; blob : string }
+
+  (* Version of the [saved] layout. *)
+  let format = 3
+
+  let save () =
+    let parser, entries =
+      C.pack !pstate (fun save -> N.Map.map (C.save_entry save) !entries)
+    in
+    { parser; sets = !sets; declared = !declared; entries;
+      squash_info = !squash_info; heights = !height_cache }
+
+  let restore saved =
+    let parser, load = C.unpack saved.parser in
+    pstate := parser;
+    sets := saved.sets;
+    declared := saved.declared;
+    entries := N.Map.map (C.load_entry load) saved.entries;
     constructor_owners :=
       N.Map.fold
         (fun _ entry owners ->
           match entry with
           | Ind ind -> add_constructor_owners ind owners
           | Def _ | Ax _ | Quot _ -> owners)
-        entriesv N.Map.empty;
-    squash_info := squash_infov;
-    height_cache := heightv
-  in
-  let open Libobject in
-  declare_object
-    {
-      (default_object "LEAN-IMPORT-STATE") with
-      cache_function = cache;
-      load_function = (fun _ v -> cache v);
-      classify_function = (fun _ -> Keep);
-    }
+        !entries N.Map.empty;
+    squash_info := saved.squash_info;
+    height_cache := saved.heights
+
+  let pack () =
+    (* Reclaim the garbage left by conversion before the encoding allocates. *)
+    Gc.compact ();
+    let saved = save () in
+    Gc.compact ();
+    let blob, () =
+      C.output_to_string "lean-import-state" (fun oc -> Marshal.to_channel oc saved [])
+    in
+    { format; digest = Digest.to_hex (Digest.string blob); blob }
+
+  let unpack packed =
+    if packed.format <> format then
+      CErrors.user_err
+        Pp.(str "Unsupported Lean importer checkpoint format " ++ int packed.format ++ str ".");
+    if packed.digest <> Digest.to_hex (Digest.string packed.blob) then
+      CErrors.user_err Pp.(str "Corrupted Lean importer checkpoint.");
+    try (Marshal.from_string packed.blob 0 : saved)
+    with Failure _ | Invalid_argument _ ->
+      CErrors.user_err Pp.(str "Invalid Lean importer checkpoint.")
+
+  let pending = Summary.ref ~name:"lean-pending-checkpoint" None
+
+  let obj =
+    let open Libobject in
+    declare_object
+      {
+        (default_object "LEAN-IMPORT-STATE-V2") with
+        (* [import] has installed the state itself before [Lib.add_leaf]. *)
+        cache_function = (fun _ -> ());
+        load_function = (fun _ packed -> pending := Some packed);
+        classify_function = (fun _ -> Keep);
+      }
+
+  let force () =
+    match !pending with
+    | None -> ()
+    | Some packed ->
+      let saved = unpack packed in
+      pending := None;
+      restore saved
+
+  let add_leaf () = Lib.add_leaf (obj (pack ()))
+end
 
 let import ~from ~until f =
+  Checkpoint.force ();
   lcnt := 1;
   let initial_pstate =
     let rec first_non_empty_line ch =
@@ -2118,7 +2181,5 @@ let import ~from ~until f =
     Flags.silently (fun () ->
         do_input { pstate = initial_pstate; skips = 0 } ~from ~until (open_in f)) ()
   in
-  let old_pstatev =
-    match pstatev with OldParser pstatev -> pstatev | NdjsonParser _ -> !pstate
-  in
-  Lib.add_leaf (lean_obj (old_pstatev, !sets, !declared, !entries, !squash_info, !height_cache))
+  (match pstatev with OldParser pstatev -> pstate := pstatev | NdjsonParser _ -> ());
+  Checkpoint.add_leaf ()

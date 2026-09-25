@@ -1,7 +1,7 @@
 open LeanExpr
 
 module RRange : sig
-  type +'a t
+  type 'a t
   (** Like Range.t, but instead of cons we append *)
 
   val empty : 'a t
