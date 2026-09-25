@@ -948,6 +948,34 @@ let add_declared n i inst =
         | Some m -> Some (Int.Map.add i inst m))
       !declared
 
+(* The field [field] of the Lean primitive record [record], declared as the Rocq
+   projection [inst]: Lean's projection function [record.f] stands for it. *)
+type projection_alias = {
+  inst : instantiation;
+  record : N.t;
+  ind : inductive;
+  field : int;
+}
+
+let projection_aliases : projection_alias Int.Map.t N.Map.t ref =
+  Summary.ref ~name:"lean-projection-aliases" N.Map.empty
+
+let add_projection_alias n i alias =
+  add_declared n i alias.inst;
+  projection_aliases :=
+    N.Map.update n
+      (fun m -> Some (Int.Map.add i alias (Option.default Int.Map.empty m)))
+      !projection_aliases
+
+let find_projection_alias n i =
+  Option.bind (N.Map.find_opt n !projection_aliases) (Int.Map.find_opt i)
+
+(* [fun params x => x.field] *)
+let rec is_projection_wrapper record field = function
+  | Lam (_, _, _, body) -> is_projection_wrapper record field body
+  | Proj (r, f, Bound 0) -> N.equal record r && Int.equal field f
+  | _ -> false
+
 let to_univ_level' u uconv =
   match to_universe uconv.map u with
   | SProp -> (uconv, LSProp)
@@ -1735,6 +1763,25 @@ let rec to_constr =
       let f, args = spine [] e in
       let to_args uconv = CList.fold_left_map (fun uconv x -> to_constr env x uconv) uconv args in
       match (f, match f with Const (n, _) -> find_rec_info n | _ -> None) with
+      | Const (n, univs), _ when N.Map.mem n !projection_aliases ->
+        fun uconv ->
+          let i = fst (int_of_univs (List.map (to_universe uconv.map) univs)) in
+          let uconv, args = to_args uconv in
+          (* [R.f params x extra] is [x.f extra] *)
+          (match find_projection_alias n i with
+          | Some { ind; field; _ }
+            when List.length args > (Global.lookup_mind (fst ind)).mind_nparams ->
+            let mib = Global.lookup_mind (fst ind) in
+            let x, extra =
+              match CList.skipn mib.mind_nparams args with
+              | x :: extra -> (x, extra)
+              | [] -> assert false
+            in
+            let p, r = Declareops.inductive_make_projection ind mib ~proj_arg:field in
+            (uconv, mkApp (mkProj (Projection.make p false, r, x), Array.of_list extra))
+          | _ ->
+            let uconv, f = instantiate n univs uconv in
+            (uconv, mkApp (f, Array.of_list args)))
       | Const (_, univs), Some info ->
         (* a recursor of a nested inductive: see [adapt_recursor] *)
         fun uconv ->
@@ -1948,8 +1995,17 @@ and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
       in
       (ref, algs)
   in
+  let inst =
+    match find_projection_alias n i with
+    | Some alias when is_projection_wrapper alias.record alias.field body -> alias.inst
+    | Some _ ->
+      CErrors.user_err
+        Pp.(str "Generated field " ++ N.pp n
+            ++ str " is not the expected primitive-record projection")
+    | None -> { ref; algs }
+  in
   let () =
-    let c = match ref with ConstRef c -> c | _ -> assert false in
+    let c = match inst.ref with ConstRef c -> c | _ -> assert false in
     if not kernel_opaque then begin
       let strategy = match hint with
         | LegacyHint -> Conv_oracle.Level (-(height n body))
@@ -1962,7 +2018,6 @@ and declare_def { name = n; ty; body; univs; hint; kernel_opaque } i =
       Redexpr.set_strategy false [ (strategy, [ Evaluable.EvalConstRef c ]) ]
     end
   in
-  let inst = { ref; algs } in
   let () = add_declared n i inst in
   inst
 
@@ -2122,15 +2177,24 @@ and declare_ind inds i =
       in
       let graph = uconv.graph in
       let univs, algs = univ_entry_gen uconv univs in
-      let record, fields, packets =
+      let record, fields, field_names, packets =
         match (packets, arities) with
         | [ (ind, ind_name, ty, ([ cty ] as ctys)) ], [ (_, [], sort) ] ->
-          let record, fields, ctys =
+          let field_names, (record, fields, ctys) =
           cty
           |> with_env_evm env_ind_params uconv (fun env evm cty ->
                  let fields, codom =
                    Reductionops.whd_decompose_prod env evm
                      (EConstr.of_constr cty)
+                 in
+                 (* the Lean projection function of each field *)
+                 let field_names =
+                   List.rev_map
+                     (fun (na, _) ->
+                       match na.Context.binder_name with
+                       | Names.Anonymous -> None
+                       | Names.Name id -> Some (N.append n (Id.to_string id)))
+                     fields
                  in
                  let _, fields =
                    CList.fold_left_map
@@ -2166,6 +2230,7 @@ and declare_ind inds i =
                    in
                    walk (npars + 1) cty'
                  in
+                 field_names,
                  match (fields, Sorts.is_sprop sort, is_recursive) with
                  | [], true, _ -> (None, [], ctys)
                  | _ :: _, false, false ->
@@ -2190,8 +2255,8 @@ and declare_ind inds i =
                    else (None, [], ctys)
                  | _ :: _, _, true -> (None, [], ctys))
           in
-          (record, fields, [ (ind, ind_name, ty, ctys) ])
-        | _ -> (None, [], packets)
+          (record, fields, field_names, [ (ind, ind_name, ty, ctys) ])
+        | _ -> (None, [], [], packets)
       in
       let entry finite =
         {
@@ -2255,8 +2320,18 @@ and declare_ind inds i =
               fields
           in
           let implfs = List.map (fun _ -> []) fields in
-          Record.Internal.declare_projections (mind, 0) ~kind ~inhabitant_id
-            proj_flags implfs
+          let projections =
+            Record.Internal.declare_projections (mind, 0) ~kind ~inhabitant_id proj_flags implfs
+          in
+          List.iteri
+            (fun field (name, p) ->
+              match (name, p.Structures.Structure.proj_body) with
+              | Some name, Some c ->
+                let inst = { ref = GlobRef.ConstRef c; algs } in
+                add_projection_alias name i { inst; record = n; ind = (mind, 0); field }
+              | _ -> ())
+            (List.combine field_names projections);
+          projections
         | _ -> []
       in
       let _, ind_name, _, _ = List.hd packets in
@@ -2838,13 +2913,14 @@ module Checkpoint = struct
     mutual_entries : C.saved_ind list N.Map.t;
     squash_info : squashy N.Map.t;
     heights : int N.Map.t;
+    aliases : projection_alias Int.Map.t N.Map.t;
     recs : rec_info N.Map.t;
   }
 
   type packed = { format : int; digest : string; blob : string }
 
   (* Version of the [saved] layout. *)
-  let format = 4
+  let format = 5
 
   let save () =
     let parser, (entries, mutual_entries) =
@@ -2853,7 +2929,8 @@ module Checkpoint = struct
         N.Map.map (List.map (C.save_ind save)) !mutual_entries)
     in
     { parser; sets = !sets; declared = !declared; entries; mutual_entries;
-      squash_info = !squash_info; heights = !height_cache; recs = !rec_info }
+      squash_info = !squash_info; heights = !height_cache; aliases = !projection_aliases;
+      recs = !rec_info }
 
   let restore saved =
     let parser, load = C.unpack saved.parser in
@@ -2871,6 +2948,7 @@ module Checkpoint = struct
         !entries N.Map.empty;
     squash_info := saved.squash_info;
     height_cache := saved.heights;
+    projection_aliases := saved.aliases;
     rec_info := saved.recs
 
   let pack () =
